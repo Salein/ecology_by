@@ -1,0 +1,80 @@
+from typing import Annotated
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+
+from app.deps import get_current_user, require_admin
+from app.services.auth_users import UserRecord
+from app.services.registry_import_jobs import create_job, get_job, run_registry_import_job
+from app.services.user_registry_cache import (
+    cache_meta,
+    cached_registry_signature,
+    clear_user_registry_cache,
+    load_cached_registry_records,
+    registry_files_fingerprint,
+)
+
+router = APIRouter(prefix="/registry", tags=["registry"])
+
+MAX_PDF_BYTES = 120 * 1024 * 1024
+
+
+@router.get("/cache")
+async def registry_cache_info(_: UserRecord = Depends(get_current_user)):
+    return {"cache": cache_meta()}
+
+
+@router.delete("/cache")
+async def registry_cache_delete():
+    clear_user_registry_cache()
+    return {"ok": True, "message": "Кэш реестра очищен."}
+
+
+@router.post("/import")
+async def registry_import(
+    background_tasks: BackgroundTasks,
+    files: Annotated[list[UploadFile], File(description="PDF реестра, можно несколько файлов")],
+    _: UserRecord = Depends(require_admin),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="Добавьте один или несколько PDF-файлов.")
+    payloads: list[tuple[str, bytes]] = []
+    for f in files:
+        if not f.filename or not f.filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail=f"Ожидаются только PDF: {f.filename!r}")
+        raw = await f.read()
+        if len(raw) > MAX_PDF_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Файл {f.filename!r} слишком большой (макс. {MAX_PDF_BYTES // (1024 * 1024)} МБ).",
+            )
+        if not raw:
+            raise HTTPException(status_code=400, detail=f"Пустой файл: {f.filename!r}")
+        payloads.append((f.filename, raw))
+
+    fingerprint = registry_files_fingerprint(payloads)
+    cached_sig = cached_registry_signature()
+    if (
+        cached_sig
+        and fingerprint == cached_sig
+        and len(load_cached_registry_records()) > 0
+    ):
+        return {
+            "skipped": True,
+            "job_id": None,
+            "message": (
+                "Загруженные PDF совпадают с данными в кэше — повторный импорт не выполняется."
+            ),
+            "cache": cache_meta(),
+        }
+
+    job_id = create_job()
+    background_tasks.add_task(run_registry_import_job, job_id, payloads, fingerprint)
+    return {"skipped": False, "job_id": job_id}
+
+
+@router.get("/import/{job_id}")
+async def registry_import_status(job_id: str, _: UserRecord = Depends(get_current_user)):
+    j = get_job(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="Задача не найдена.")
+    return j

@@ -1,0 +1,41 @@
+{
+  "updated_at": "2026-04-12T19:28:22.405733+00:00",
+  "registries_page_url": "https://www.ecoinfo.by/%D0%B0%D0%B4%D0%BC%D0%B8%D0%BD%D0%B8%D1%81%D1%82%D1%80%D0%B0%D1%82%D0%B8%D0%B2%D0%BD%D1%8B%D0%B5-%D0%BF%D1%80%D0%BE%D1%86%D0%B5%D0%B4%D1%83%D1%80%D1%8B/%D1%80%D0%B5%D0%B5%D1%81%D1%82%D1%80%D1%8B",
+  "part1": {
+    "source_url": "https://www.ecoinfo.by/wp-content/uploads/2026/04/Реестр объектов по использованию отходов (часть I).pdf",
+    "saved_path": "part1.pdf",
+    "bytes": 5715443,
+    "sha256": "4aded7a16ab977c6f2f73492285daf199744fe27d644ba02b02daca4180f1847",
+    "downloaded_at": "2026-04-12T19:10:29.064284+00:00"
+  },
+  "part2": {
+    "source_url": "https://www.ecoinfo.by/wp-content/uploads/2026/04/Реестр объектов по использованию отходов (часть II).pdf",
+    "saved_path": "part2.pdf",
+    "bytes": 29938361,
+    "sha256": "293b23c192927726eccae79f121e67605ebdf4faeff84b7ba3cd5e9188b524e8",
+    "downloaded_at": "2026-04-12T19:10:44.035088+00:00"
+  },
+  "processing": {
+    "part1": {
+      "pages": 1999,
+      "chars": 1615872,
+      "text_file": "processed/part1_full.txt",
+      "extracted_at": "2026-04-12T19:13:57.997749+00:00",
+      "error": null
+    },
+    "part2": {
+      "pages": 4210,
+      "chars": 4952218,
+      "text_file": "processed/part2_full.txt",
+      "extracted_at": "2026-04-12T19:28:22.395742+00:00",
+      "error": null
+    }
+  },
+  "last_job": {
+    "started_at": "2026-04-12T19:10:22.111905+00:00",
+    "finished_at": "2026-04-12T19:28:22.405402+00:00",
+    "ok": true,
+    "message": "Скачивание и извлечение текста завершены."
+  },
+  "page_fetched_at": "2026-04-12T19:10:24.415795+00:00"
+}

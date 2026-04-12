@@ -1,0 +1,15 @@
+# Дублирует правила корневого .gitignore при работе из каталога server;
+# при `git init` в корне ecology достаточно ../.gitignore
+
+app/data/auth_users.json
+app/data/auth_users.json.tmp
+app/data/geocode_cache.json
+app/data/user_registry_cache.json
+
+.env
+.env.*
+!.env.example
+
+.venv/
+__pycache__/
+*.py[cod]

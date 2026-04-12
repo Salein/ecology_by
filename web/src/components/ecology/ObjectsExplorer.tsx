@@ -1,0 +1,687 @@
+"use client";
+
+import dynamic from "next/dynamic";
+import Link from "next/link";
+import type { ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAuth } from "@/context/AuthContext";
+import {
+  fetchRegistryCacheMetaResult,
+  fetchRegistryImportStatus,
+  postRegistryImportWithUploadProgress,
+  reverseGeocode,
+  searchObjects,
+  type RegistryCacheMeta,
+  type WasteObjectRow,
+} from "@/lib/api";
+import { formatPhoneSegmentToLines } from "@/lib/phoneDisplay";
+
+const LocationMapModal = dynamic(
+  () => import("./LocationMapModal").then((m) => m.LocationMapModal),
+  { ssr: false },
+);
+
+const EM_DASH = "—";
+
+const LOCATION_PLACEHOLDER = "Выберите местоположение объекта";
+
+/** Сетка строки результатов: код | собственник | объект | адрес | телефоны | расстояние */
+const RESULT_GRID =
+  "sm:grid-cols-[minmax(0,4.5rem)_minmax(0,1fr)_minmax(0,1.05fr)_minmax(0,1.35fr)_minmax(0,1.05fr)_minmax(0,4.75rem)]";
+
+function formatDistance(km: number | null | undefined): string {
+  if (km == null || Number.isNaN(km)) return EM_DASH;
+  return `~${Math.round(km)} км`;
+}
+
+function distanceIsMissing(km: number | null | undefined): boolean {
+  return km == null || Number.isNaN(Number(km));
+}
+
+/** Под строкой с «—», если точка на карте выбрана, а км не посчитались */
+const DISTANCE_NOT_CALCULATED_NOTE = "Расстояние не удалось рассчитать";
+
+/** Перенос строки после почтового индекса (6 цифр в начале), типично для адресов РБ. */
+function formatAddressDisplay(address: string | null | undefined): ReactNode {
+  const raw = address?.trim();
+  if (!raw) return EM_DASH;
+  const m = raw.match(/^(\d{6})\s*,\s*(.+)$/);
+  if (m) {
+    return (
+      <>
+        <span className="block">{m[1]},</span>
+        <span className="block">{m[2]}</span>
+      </>
+    );
+  }
+  const m2 = raw.match(/^(\d{6})\s+(?=\S)(.+)$/);
+  if (m2) {
+    return (
+      <>
+        <span className="block">{m2[1]}</span>
+        <span className="block">{m2[2]}</span>
+      </>
+    );
+  }
+  return raw;
+}
+
+function dedupePhoneLines(lines: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const line of lines) {
+    const key = line.replace(/\D/g, "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(line);
+  }
+  return out;
+}
+
+/** Несколько номеров через «;» — каждый с новой строки, нормализация и читаемые группы цифр. */
+function formatPhonesDisplay(phones: string | null | undefined): ReactNode {
+  const raw = phones?.trim();
+  if (!raw) return EM_DASH;
+  const parts = dedupePhoneLines(
+    raw
+      .split(/\s*;\s*/)
+      .flatMap((p) => formatPhoneSegmentToLines(p.trim()))
+      .filter(Boolean),
+  );
+  if (parts.length === 0) return EM_DASH;
+  if (parts.length === 1) return parts[0];
+  return (
+    <>
+      {parts.map((p, i) => (
+        <span key={i} className="block">
+          {p}
+        </span>
+      ))}
+    </>
+  );
+}
+
+function ResultsSkeleton() {
+  return (
+    <ul className="flex flex-col gap-4" aria-hidden>
+      {Array.from({ length: 7 }).map((_, i) => (
+        <li
+          key={i}
+          className={`grid animate-pulse grid-cols-1 gap-3 rounded-2xl border border-emerald-100/90 bg-white/90 p-4 shadow-sm shadow-emerald-900/5 ${RESULT_GRID} sm:items-start sm:gap-4`}
+        >
+          <div className="h-5 w-10 rounded bg-emerald-100 sm:pt-0.5" />
+          <div className="h-4 w-full max-w-full rounded bg-emerald-100 sm:pt-0.5" />
+          <div className="h-20 w-full rounded-xl bg-emerald-100" />
+          <div className="h-14 w-full rounded-lg bg-emerald-100" />
+          <div className="h-10 w-full rounded-lg bg-emerald-100" />
+          <div className="h-10 w-14 justify-self-end rounded-xl bg-emerald-100 sm:justify-self-end sm:pt-0.5" />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export type ObjectsExplorerProps = {
+  /** Только администратор может загружать PDF реестра */
+  canImportRegistry: boolean;
+};
+
+export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
+  const { user, logout } = useAuth();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [queryInput, setQueryInput] = useState("");
+  const [query, setQuery] = useState("");
+  const [lat, setLat] = useState<number | undefined>(undefined);
+  const [lon, setLon] = useState<number | undefined>(undefined);
+  const [addressLabel, setAddressLabel] = useState("");
+  const [mapOpen, setMapOpen] = useState(false);
+  const [rows, setRows] = useState<WasteObjectRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [cacheMeta, setCacheMeta] = useState<RegistryCacheMeta | null>(null);
+  const [cacheMetaReady, setCacheMetaReady] = useState(false);
+  const [registryMetaError, setRegistryMetaError] = useState<string | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importProgress, setImportProgress] = useState(0);
+  const [importMessage, setImportMessage] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
+
+  const refreshAddress = useCallback(async (la: number, lo: number) => {
+    setAddressLabel(`${la.toFixed(4)}, ${lo.toFixed(4)}`);
+    try {
+      const name = await reverseGeocode(la, lo);
+      if (name) setAddressLabel(name);
+    } catch {
+      /* координаты уже в подписи */
+    }
+  }, []);
+
+  const runSearch = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const items = await searchObjects({
+        query,
+        lat,
+        lon,
+      });
+      setRows(items);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Ошибка запроса");
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [query, lat, lon]);
+
+  const submitQuery = useCallback(() => {
+    setQuery(queryInput.trim());
+  }, [queryInput]);
+
+  const { wasteCodeDisplay, wasteTypeDisplay } = useMemo(() => {
+    const first = rows[0];
+    if (!first) {
+      return { wasteCodeDisplay: EM_DASH, wasteTypeDisplay: EM_DASH };
+    }
+    return {
+      wasteCodeDisplay: first.waste_code?.trim() || EM_DASH,
+      wasteTypeDisplay: first.waste_type_name?.trim() || EM_DASH,
+    };
+  }, [rows]);
+
+  useEffect(() => {
+    void fetchRegistryCacheMetaResult().then((res) => {
+      setCacheMetaReady(true);
+      if (res.ok) {
+        setCacheMeta(res.cache);
+        setRegistryMetaError(null);
+      } else {
+        setCacheMeta(null);
+        setRegistryMetaError(
+          res.reason === "таймаут"
+            ? "сервер не ответил вовремя"
+            : res.reason === "сеть или CORS"
+              ? "нет связи с API (сеть или CORS)"
+              : `ответ сервера: ${res.reason}`,
+        );
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    void runSearch();
+  }, [runSearch]);
+
+  useEffect(() => {
+    if (lat != null && lon != null) void refreshAddress(lat, lon);
+    else setAddressLabel("");
+  }, [lat, lon, refreshAddress]);
+
+  const handleRegistryFiles = useCallback(
+    async (list: FileList | null) => {
+      if (!list?.length) return;
+      const files = Array.from(list).filter((f) => f.name.toLowerCase().endsWith(".pdf"));
+      if (!files.length) {
+        setImportError("Выберите файлы в формате PDF.");
+        return;
+      }
+      setImportError(null);
+      setImportBusy(true);
+      setImportProgress(0);
+      setImportMessage("Отправка файлов на сервер…");
+      try {
+        const post = await postRegistryImportWithUploadProgress(files, (up) => {
+          setImportProgress(Math.min(35, Math.round(up * 0.35)));
+          setImportMessage("Отправка файлов на сервер…");
+        });
+
+        if (post.skipped) {
+          if (post.cache) {
+            setCacheMeta(post.cache);
+            setRegistryMetaError(null);
+            setCacheMetaReady(true);
+          } else {
+            const res = await fetchRegistryCacheMetaResult();
+            setCacheMetaReady(true);
+            if (res.ok) {
+              setCacheMeta(res.cache);
+              setRegistryMetaError(null);
+            } else {
+              setCacheMeta(null);
+              setRegistryMetaError(res.reason);
+            }
+          }
+          setImportMessage(post.message || "Данные совпадают с кэшем — импорт пропущен.");
+          setImportProgress(100);
+          await runSearch();
+        } else {
+          for (;;) {
+            const st = await fetchRegistryImportStatus(post.job_id);
+            setImportMessage(st.message || st.status);
+            setImportProgress(Math.min(100, Math.round(35 + st.progress * 0.65)));
+            if (st.status === "done") break;
+            if (st.status === "error") {
+              throw new Error(st.error || "Ошибка обработки реестра");
+            }
+            await new Promise((r) => setTimeout(r, 450));
+          }
+
+          const res = await fetchRegistryCacheMetaResult();
+          setCacheMetaReady(true);
+          if (res.ok) {
+            setCacheMeta(res.cache);
+            setRegistryMetaError(null);
+          } else {
+            setCacheMeta(null);
+            setRegistryMetaError(res.reason);
+          }
+          setImportMessage("Готово. Обновляем список…");
+          setImportProgress(100);
+          await runSearch();
+        }
+      } catch (e) {
+        setImportError(e instanceof Error ? e.message : "Ошибка загрузки");
+      } finally {
+        setImportBusy(false);
+        setImportProgress(0);
+        setImportMessage("");
+        if (fileRef.current) fileRef.current.value = "";
+      }
+    },
+    [runSearch],
+  );
+
+  const showSkeleton = loading || importBusy;
+
+  const locationChosen = lat != null && lon != null;
+  const showDistanceSearchLoader = loading && locationChosen && !importBusy;
+  const locationDisplay = locationChosen
+    ? addressLabel.trim() || `${lat!.toFixed(4)}, ${lon!.toFixed(4)}`
+    : LOCATION_PLACEHOLDER;
+
+  const distancesMissingForAllRows = useMemo(
+    () =>
+      lat != null &&
+      lon != null &&
+      rows.length > 0 &&
+      rows.every((r) => distanceIsMissing(r.distance_km)),
+    [lat, lon, rows],
+  );
+
+  const registryLoaded = Boolean(cacheMeta && cacheMeta.record_count > 0);
+  const registryUploadedAt = useMemo(() => {
+    if (!cacheMeta?.updated_at) return null;
+    try {
+      return new Date(cacheMeta.updated_at).toLocaleString("ru-BY", {
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return cacheMeta.updated_at;
+    }
+  }, [cacheMeta?.updated_at]);
+
+  return (
+    <div className="relative z-10 mx-auto flex w-full max-w-7xl flex-col gap-8 px-4 py-10 sm:px-6">
+      <div className="flex flex-wrap items-center justify-end gap-2 text-sm">
+        <span className="mr-auto text-emerald-900/70">
+          {user?.name ? (
+            <>
+              <span className="font-medium text-emerald-950">{user.name}</span>
+              <span className="text-emerald-800/60"> · {user.email}</span>
+            </>
+          ) : null}
+        </span>
+        {user?.role === "admin" ? (
+          <Link
+            href="/admin"
+            className="rounded-xl border border-emerald-200/90 bg-white px-3 py-2 font-medium text-emerald-900 shadow-sm transition hover:bg-emerald-50/90"
+          >
+            Админ-панель
+          </Link>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => {
+            void (async () => {
+              await logout();
+              window.location.href = "/";
+            })();
+          }}
+          className="rounded-xl border border-stone-200 bg-white px-3 py-2 font-medium text-stone-700 transition hover:bg-stone-50"
+        >
+          Выйти
+        </button>
+      </div>
+
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight text-emerald-950">
+            Поиск объектов обращения с отходами
+          </h1>
+          <p className="text-sm text-emerald-900/55">
+            {canImportRegistry
+              ? "Загрузите PDF реестров (часть I и II) — данные кэшируются на сервере. "
+              : "Данные реестра на сервере. "}
+            В списке — семь ближайших объектов к выбранной точке. Расстояние — ориентировочное: считается по адресу
+            объекта (геокодирование, затем Haversine). Карта — OpenStreetMap.
+          </p>
+          <div className="flex flex-col gap-1 border-l-2 border-emerald-200/80 py-0.5 pl-3 text-xs sm:text-[13px]">
+            <p className="text-emerald-900/80">
+              <span className="font-semibold text-emerald-950">Реестр в системе:</span>{" "}
+              {!cacheMetaReady ? (
+                <span className="text-emerald-800/50">проверка…</span>
+              ) : registryMetaError ? (
+                <span className="text-red-800/95" title={registryMetaError}>
+                  статус неизвестен
+                </span>
+              ) : registryLoaded ? (
+                <span className="text-emerald-800">загружен</span>
+              ) : (
+                <span className="text-amber-800/90">не загружен</span>
+              )}
+            </p>
+            <p className="text-emerald-900/80">
+              <span className="font-semibold text-emerald-950">Дата загрузки / обновления:</span>{" "}
+              {!cacheMetaReady ? (
+                <span className="text-emerald-800/50">—</span>
+              ) : registryMetaError ? (
+                <span className="text-emerald-800/50">—</span>
+              ) : registryLoaded && registryUploadedAt ? (
+                <span className="text-emerald-800">{registryUploadedAt}</span>
+              ) : (
+                <span className="text-emerald-800/55">—</span>
+              )}
+            </p>
+            {registryMetaError && cacheMetaReady ? (
+              <p className="text-xs text-red-800/90">
+                Не удалось запросить <code className="rounded bg-red-100/80 px-1">/api/v1/registry/cache</code>:{" "}
+                {registryMetaError}. Запустите Python API, проверьте{" "}
+                <code className="rounded bg-red-100/80 px-1">NEXT_PUBLIC_API_URL</code> и CORS.
+              </p>
+            ) : null}
+            {registryLoaded && cacheMeta ? (
+              <p className="text-emerald-800/50">
+                В кэше записей:{" "}
+                <span className="font-medium tabular-nums text-emerald-900/70">{cacheMeta.record_count}</span>
+              </p>
+            ) : cacheMetaReady && !registryMetaError && !registryLoaded ? (
+              canImportRegistry ? (
+                <p className="text-amber-800/85">
+                  Нажмите «Загрузить реестр» и выберите один или два PDF с ecoinfo.by.
+                </p>
+              ) : (
+                <p className="text-amber-800/85">
+                  Реестр ещё не загружен в систему. Обратитесь к администратору для загрузки PDF.
+                </p>
+              )
+            ) : null}
+          </div>
+        </div>
+        {canImportRegistry ? (
+          <div className="flex shrink-0 flex-col gap-2 sm:items-end">
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/pdf,.pdf"
+              multiple
+              className="hidden"
+              onChange={(e) => void handleRegistryFiles(e.target.files)}
+            />
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              disabled={importBusy}
+              className="rounded-2xl border border-emerald-200/90 bg-white px-4 py-2.5 text-sm font-medium text-emerald-950 shadow-sm shadow-emerald-900/5 transition hover:border-emerald-300 hover:bg-emerald-50/80 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {importBusy ? "Обработка…" : "Загрузить реестр"}
+            </button>
+          </div>
+        ) : null}
+      </header>
+
+      {importError ? (
+        <p className="rounded-xl border border-red-200/90 bg-red-50/95 px-4 py-3 text-sm text-red-800">{importError}</p>
+      ) : null}
+
+      {importBusy ? (
+        <div
+          className="rounded-2xl border border-emerald-200/80 bg-emerald-50/90 px-4 py-4 shadow-sm shadow-emerald-900/5"
+          role="status"
+          aria-live="polite"
+        >
+          <p className="mb-3 text-sm font-medium text-emerald-950">{importMessage || "Обработка…"}</p>
+          <div className="h-2.5 w-full overflow-hidden rounded-full bg-emerald-100">
+            <div
+              className="h-full rounded-full bg-emerald-500 transition-[width] duration-300 ease-out"
+              style={{ width: `${importProgress}%` }}
+            />
+          </div>
+          <p className="mt-2 text-xs text-emerald-900/50">
+            Геокодирование адресов идёт через Nominatim и может занять несколько минут при первой загрузке.
+          </p>
+        </div>
+      ) : null}
+
+      <section className="flex flex-col gap-5">
+        <div className="flex flex-col gap-2">
+          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-stretch">
+            <label className="min-w-0 flex-1">
+              <span className="sr-only">
+                Код объекта или вид отхода — строка поиска
+              </span>
+              <input
+                type="search"
+                value={queryInput}
+                onChange={(e) => {
+                  setQueryInput(e.target.value);
+                  setLat(undefined);
+                  setLon(undefined);
+                  setAddressLabel("");
+                }}
+                onKeyDown={(e) => e.key === "Enter" && submitQuery()}
+                placeholder="Код объекта или вид отхода"
+                disabled={importBusy}
+                className="h-full w-full min-h-[3rem] rounded-2xl border border-emerald-100 bg-white/90 px-5 py-3.5 text-base text-stone-800 shadow-inner shadow-emerald-900/5 outline-none ring-emerald-200/60 placeholder:text-emerald-900/35 focus:border-emerald-300 focus:ring-2 disabled:opacity-60"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => submitQuery()}
+              disabled={loading || importBusy}
+              className="shrink-0 rounded-2xl bg-emerald-700 px-6 py-3.5 text-base font-medium text-white shadow-sm shadow-emerald-900/20 transition hover:bg-emerald-800 disabled:opacity-60 sm:min-w-[8.5rem]"
+            >
+              {loading ? (locationChosen ? "Расчёт…" : "Поиск…") : "Найти"}
+            </button>
+          </div>
+          {error ? (
+            <p className="text-sm text-red-600">
+              {error}. Убедитесь, что Python API запущен (порт 8000).
+            </p>
+          ) : null}
+        </div>
+
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="flex min-w-0 flex-1 flex-col gap-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-emerald-800/50">
+              Код / вид отходов
+            </span>
+            <div
+              className="flex min-w-0 flex-wrap items-stretch gap-2 rounded-2xl border border-emerald-100/80 bg-emerald-50/80 px-4 py-3 shadow-sm shadow-emerald-900/5"
+              aria-live="polite"
+            >
+              <div
+                className="flex w-[7.5rem] max-w-full shrink-0 items-center rounded-xl border border-emerald-100/90 bg-white/95 px-3 py-2.5 text-sm tabular-nums text-stone-900"
+                title="Код отхода"
+              >
+                {wasteCodeDisplay}
+              </div>
+              <div
+                className="flex min-w-[12rem] flex-1 items-center rounded-xl border border-emerald-100/90 bg-white/95 px-3 py-2.5 text-sm leading-snug text-stone-900"
+                title="Полное наименование вида отходов"
+              >
+                {wasteTypeDisplay}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex w-full flex-col gap-2 lg:w-80">
+            <span className="text-xs font-medium uppercase tracking-wide text-emerald-800/50">
+              Местоположение объекта
+            </span>
+            <div
+              className={`rounded-2xl border border-emerald-100/80 bg-emerald-50/80 px-4 py-3 text-sm leading-snug shadow-sm shadow-emerald-900/5 min-h-[3.25rem] flex items-center ${
+                locationChosen ? "text-stone-800" : "text-emerald-800/40 italic"
+              }`}
+            >
+              {locationDisplay}
+            </div>
+            <button
+              type="button"
+              onClick={() => setMapOpen(true)}
+              disabled={importBusy}
+              className="rounded-2xl border border-emerald-200/90 bg-emerald-600 px-4 py-3 text-center text-sm font-medium text-white shadow-sm shadow-emerald-900/15 transition hover:border-emerald-300 hover:bg-emerald-700 disabled:opacity-60"
+            >
+              Выбрать местоположение
+            </button>
+            {!locationChosen ? (
+              <p className="text-[11px] leading-snug text-emerald-800/55">
+                После выбора точки на карте появится ориентировочное расстояние до объектов по их адресам.
+              </p>
+            ) : null}
+            {distancesMissingForAllRows ? (
+              <p className="text-[11px] leading-snug text-amber-800/90">
+                Не удалось получить координаты по адресам этих записей (Nominatim). Проверьте адреса в PDF или попробуйте
+                позже; при необходимости увеличьте лимит запросов: переменная REGISTRY_SEARCH_GEOCODE_MAX на сервере.
+              </p>
+            ) : null}
+          </div>
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        {showDistanceSearchLoader ? (
+          <div
+            className="flex flex-col gap-3 rounded-2xl border border-emerald-200/80 bg-emerald-50/90 px-4 py-4 shadow-sm shadow-emerald-900/5"
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+          >
+            <div className="flex items-center gap-3">
+              <span
+                className="size-5 shrink-0 animate-spin rounded-full border-2 border-emerald-200 border-t-emerald-600"
+                aria-hidden
+              />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-emerald-950">Идёт расчёт расстояний…</p>
+                <p className="mt-0.5 text-xs text-emerald-800/60">
+                  Геокодирование адресов объектов и подбор ближайших к вашей точке. Первый запрос может занять до минуты
+                  из‑за лимитов Nominatim.
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : null}
+        <div
+          className={`hidden gap-4 px-4 text-xs font-semibold uppercase tracking-wide text-emerald-800/45 sm:grid ${RESULT_GRID}`}
+        >
+          <span>Код объекта</span>
+          <span>Собственник</span>
+          <span>Объект</span>
+          <span>Адрес</span>
+          <span>Телефоны</span>
+          <span
+            className="text-right normal-case sm:text-right"
+            title="Ориентировочно по геокодированию адреса объекта"
+          >
+            Примерное Расстояние км
+          </span>
+        </div>
+
+        {showSkeleton ? (
+          <ResultsSkeleton />
+        ) : (
+          <ul className="flex flex-col gap-4">
+            {rows.map((row, idx) => (
+              <li
+                key={`${row.waste_code ?? "x"}-${row.id}-${idx}`}
+                className={`grid grid-cols-1 gap-3 rounded-2xl border border-emerald-100/90 bg-white/95 p-4 shadow-sm shadow-emerald-900/5 ${RESULT_GRID} sm:items-start sm:gap-4`}
+              >
+                <div className="text-sm font-semibold text-emerald-900/90 sm:pt-0.5 sm:text-base">{row.id}</div>
+                <div className="min-w-0 text-base leading-snug text-stone-800 sm:pt-0.5">{row.owner}</div>
+                <div className="flex min-w-0 flex-col gap-2 rounded-xl border border-emerald-100/70 bg-emerald-50/70 px-3 py-2.5 text-base leading-snug text-stone-800">
+                  <span>{row.object_name}</span>
+                  {row.accepts_external_waste !== false ? (
+                    <span className="inline-flex w-fit max-w-full rounded-lg border border-emerald-200/80 bg-white/80 px-2 py-1 text-sm font-medium leading-tight text-emerald-950">
+                      Принимает отходы от других лиц
+                    </span>
+                  ) : null}
+                </div>
+                <div className="min-w-0">
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-emerald-800/40 sm:sr-only">
+                    Адрес объекта
+                  </span>
+                  <div className="rounded-xl border border-emerald-100/70 bg-emerald-50/40 px-3 py-2 text-base leading-relaxed text-stone-800">
+                    {formatAddressDisplay(row.address)}
+                  </div>
+                </div>
+                <div className="min-w-0">
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-emerald-800/40 sm:sr-only">
+                    Телефоны
+                  </span>
+                  <div className="rounded-xl border border-emerald-100/70 bg-emerald-50/40 px-3 py-2 text-sm leading-relaxed text-stone-800 break-words tabular-nums">
+                    {formatPhonesDisplay(row.phones)}
+                  </div>
+                </div>
+                <div className="flex flex-col items-end gap-1 sm:justify-end sm:pt-0.5">
+                  <span
+                    className="inline-flex rounded-xl border border-emerald-200/60 bg-emerald-100/95 px-3 py-2 text-sm font-medium text-emerald-900"
+                    title={
+                      locationChosen && distanceIsMissing(row.distance_km)
+                        ? DISTANCE_NOT_CALCULATED_NOTE
+                        : undefined
+                    }
+                  >
+                    {formatDistance(row.distance_km)}
+                  </span>
+                  {row.distance_note?.trim() ? (
+                    <span className="max-w-[14rem] text-right text-[13px] leading-snug text-emerald-900/55 sm:max-w-[10rem]">
+                      {row.distance_note.trim()}
+                    </span>
+                  ) : locationChosen &&
+                    distanceIsMissing(row.distance_km) &&
+                    !distancesMissingForAllRows ? (
+                    <span className="max-w-[14rem] text-right text-[13px] leading-snug text-amber-900/70 sm:max-w-[10rem]">
+                      {DISTANCE_NOT_CALCULATED_NOTE}
+                    </span>
+                  ) : null}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {!showSkeleton && rows.length === 0 && !error ? (
+          <p className="text-center text-sm text-emerald-900/45">
+            Нет данных: загрузите реестр PDF или измените запрос / точку на карте.
+          </p>
+        ) : null}
+      </section>
+
+      <LocationMapModal
+        open={mapOpen}
+        onClose={() => setMapOpen(false)}
+        initialLat={lat}
+        initialLon={lon}
+        onConfirm={(la, lo) => {
+          setLat(la);
+          setLon(lo);
+          setMapOpen(false);
+        }}
+      />
+    </div>
+  );
+}

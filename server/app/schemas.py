@@ -1,0 +1,84 @@
+from typing import Literal, Self
+
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+
+
+class ObjectSearchRequest(BaseModel):
+    query: str = ""
+    waste_code: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+
+    @field_validator("lat", "lon", mode="before")
+    @classmethod
+    def coerce_lat_lon(cls, v: object) -> object:
+        if isinstance(v, str):
+            s = v.strip()
+            return float(s) if s else None
+        return v
+
+
+class WasteObjectOut(BaseModel):
+    id: int
+    owner: str
+    object_name: str
+    address: str | None = None
+    phones: str | None = None
+    waste_code: str | None = None
+    waste_type_name: str | None = None
+    accepts_external_waste: bool = True
+    distance_km: float | None = None
+    distance_note: str | None = None
+
+
+class ObjectSearchResponse(BaseModel):
+    items: list[WasteObjectOut]
+
+
+class PdfExtractResponse(BaseModel):
+    pages: int
+    text: str
+    tables_preview: list[list[list[str | None]]] = Field(default_factory=list)
+
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+    name: str
+    role: Literal["user", "admin"]
+    created_at: str
+    blocked: bool = False
+    protected_account: bool = Field(
+        default=False,
+        description="Учётная запись из BOOTSTRAP_OWNER_EMAIL — удаление недоступно",
+    )
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    name: str = Field(default="", max_length=200)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(max_length=128)
+
+
+class AuthSessionResponse(BaseModel):
+    """Только профиль; JWT в HttpOnly cookie (Set-Cookie), не в теле ответа."""
+
+    user: UserOut
+
+
+class UserAdminUpdate(BaseModel):
+    """Хотя бы одно поле; частичное обновление роли и/или блокировки."""
+
+    role: Literal["user", "admin"] | None = None
+    blocked: bool | None = None
+
+    @model_validator(mode="after")
+    def at_least_one_field(self) -> Self:
+        if self.role is None and self.blocked is None:
+            raise ValueError("Укажите role и/или blocked")
+        return self

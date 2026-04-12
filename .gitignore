@@ -1,0 +1,46 @@
+# --- Секреты и окружение (никогда в Git) ---
+**/.env
+**/.env.local
+**/.env.development
+**/.env.production
+**/.env.test
+**/.env.development.local
+**/.env.test.local
+**/.env.production.local
+**/.env*.backup
+**/.env*.bak
+*.pem
+*.key
+
+# --- Учётные записи и чувствительные локальные данные API ---
+**/auth_users.json
+**/auth_users.json.tmp
+server/app/data/geocode_cache.json
+server/app/data/user_registry_cache.json
+
+# --- Python ---
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.pytest_cache/
+**/.mypy_cache/
+
+# --- Node / Next.js ---
+**/node_modules/
+**/.next/
+**/out/
+**/.turbo/
+*.tsbuildinfo
+
+# --- IDE / ОС ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Деплой (локальные привязки) ---
+**/.vercel
+**/.netlify
