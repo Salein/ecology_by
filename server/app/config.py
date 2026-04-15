@@ -52,10 +52,13 @@ class Settings:
         "NOMINATIM_USER_AGENT",
         "ecology-demo/1.0 (local dev; contact@example.com)",
     )
+    nominatim_timeout_sec: float = float(os.getenv("NOMINATIM_TIMEOUT_SEC", "3.0"))
     registry_closest_limit: int = int(os.getenv("REGISTRY_CLOSEST_LIMIT", "7"))
     registry_geocode_delay_sec: float = float(os.getenv("REGISTRY_GEOCODE_DELAY_SEC", "1.1"))
     # За один поиск — не больше запросов к Nominatim по адресам без координат (остальные без расстояния)
-    registry_search_geocode_max: int = _int_env("REGISTRY_SEARCH_GEOCODE_MAX", 40)
+    registry_search_geocode_max: int = _int_env("REGISTRY_SEARCH_GEOCODE_MAX", 8)
+    # Общий бюджет времени на on-demand геокодирование в одном поиске
+    registry_search_geocode_budget_sec: float = float(os.getenv("REGISTRY_SEARCH_GEOCODE_BUDGET_SEC", "8.0"))
     # JWT (в продакшене задайте свой секрет)
     jwt_secret: str = os.getenv("JWT_SECRET", "ecology-dev-change-me-in-production")
     jwt_expire_hours: int = _int_env("JWT_EXPIRE_HOURS", 168)

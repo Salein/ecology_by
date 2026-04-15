@@ -47,7 +47,12 @@ class UserOut(BaseModel):
     name: str
     role: Literal["user", "admin"]
     created_at: str
+    last_seen_at: str | None = None
     blocked: bool = False
+    subscription_active: bool = Field(
+        default=False,
+        description="Активная подписка (в т.ч. выставлена администратором вручную)",
+    )
     protected_account: bool = Field(
         default=False,
         description="Учётная запись из BOOTSTRAP_OWNER_EMAIL — удаление недоступно",
@@ -57,7 +62,15 @@ class UserOut(BaseModel):
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
-    name: str = Field(default="", max_length=200)
+    name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name_not_blank(cls, v: str) -> str:
+        s = " ".join(v.replace("\xa0", " ").split()).strip()
+        if not s:
+            raise ValueError("Имя обязательно")
+        return s
 
 
 class LoginRequest(BaseModel):
@@ -72,13 +85,14 @@ class AuthSessionResponse(BaseModel):
 
 
 class UserAdminUpdate(BaseModel):
-    """Хотя бы одно поле; частичное обновление роли и/или блокировки."""
+    """Хотя бы одно поле; частичное обновление роли, блокировки и/или подписки."""
 
     role: Literal["user", "admin"] | None = None
     blocked: bool | None = None
+    subscription_active: bool | None = None
 
     @model_validator(mode="after")
     def at_least_one_field(self) -> Self:
-        if self.role is None and self.blocked is None:
-            raise ValueError("Укажите role и/или blocked")
+        if self.role is None and self.blocked is None and self.subscription_active is None:
+            raise ValueError("Укажите role, blocked и/или subscription_active")
         return self

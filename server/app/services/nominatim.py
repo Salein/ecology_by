@@ -19,7 +19,7 @@ def forward_geocode_sync(query: str) -> tuple[float, float] | None:
         "countrycodes": "by",
     }
     headers = {"User-Agent": settings.nominatim_user_agent}
-    with httpx.Client(timeout=25.0) as client:
+    with httpx.Client(timeout=settings.nominatim_timeout_sec) as client:
         r = client.get(url, params=params, headers=headers)
         r.raise_for_status()
         data = r.json()
@@ -46,7 +46,7 @@ def forward_geocode_sync_relaxed(query: str) -> tuple[float, float] | None:
     }
     headers = {"User-Agent": settings.nominatim_user_agent}
     try:
-        with httpx.Client(timeout=25.0) as client:
+        with httpx.Client(timeout=settings.nominatim_timeout_sec) as client:
             r = client.get(url, params=params, headers=headers)
             r.raise_for_status()
             data = r.json()
@@ -61,7 +61,7 @@ async def reverse_geocode(lat: float, lon: float) -> str | None:
     url = "https://nominatim.openstreetmap.org/reverse"
     params = {"lat": lat, "lon": lon, "format": "json", "accept-language": "ru"}
     headers = {"User-Agent": settings.nominatim_user_agent}
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=settings.nominatim_timeout_sec) as client:
         r = await client.get(url, params=params, headers=headers)
         r.raise_for_status()
         data = r.json()
@@ -72,7 +72,7 @@ async def search_places(q: str, limit: int = 5) -> list[dict]:
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": q, "format": "json", "limit": limit, "accept-language": "ru"}
     headers = {"User-Agent": settings.nominatim_user_agent}
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=settings.nominatim_timeout_sec) as client:
         r = await client.get(url, params=params, headers=headers)
         r.raise_for_status()
         return r.json()

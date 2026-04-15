@@ -25,7 +25,9 @@ async def admin_list_users(_: Annotated[UserRecord, Depends(require_admin)]) -> 
             name=u.name,
             role=u.role,
             created_at=u.created_at,
+            last_seen_at=u.last_seen_at,
             blocked=u.blocked,
+            subscription_active=u.subscription_active,
             protected_account=is_bootstrap_owner_user(u),
         )
         for u in list_users()
@@ -46,12 +48,27 @@ async def admin_update_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Нельзя изменять доступ к сервису для учётной записи владельца системы",
         )
+    if is_bootstrap_owner_user(target) and body.role is not None and body.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Роль учётной записи владельца системы всегда администратор",
+        )
     if body.blocked is True and user_id == admin.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Нельзя заблокировать свою учётную запись",
         )
-    updated = update_user_admin(user_id, role=body.role, blocked=body.blocked)
+    if body.subscription_active is False and user_id == admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Нельзя отключить подписку и доступ к своей учётной записи",
+        )
+    updated = update_user_admin(
+        user_id,
+        role=body.role,
+        blocked=body.blocked,
+        subscription_active=body.subscription_active,
+    )
     if not updated:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
     return UserOut(
@@ -60,7 +77,9 @@ async def admin_update_user(
         name=updated.name,
         role=updated.role,
         created_at=updated.created_at,
+        last_seen_at=updated.last_seen_at,
         blocked=updated.blocked,
+        subscription_active=updated.subscription_active,
         protected_account=is_bootstrap_owner_user(updated),
     )
 

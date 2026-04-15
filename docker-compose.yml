@@ -1,0 +1,51 @@
+# Один URL (порт 8080): фронт + API за nginx.
+#
+# Перед первым запуском:
+#   cp server/.env.example server/.env
+#   Заполните JWT_SECRET, при необходимости BOOTSTRAP_*.
+#
+# Локально:
+#   docker compose up --build
+#   Откройте http://localhost:8080
+#
+# Другой домен (VPS): задайте в файле .env рядом с compose:
+#   PUBLIC_ORIGIN=https://example.com
+#   JWT_SECRET=...
+# Пересоберите web: docker compose build --no-cache web
+
+services:
+  api:
+    build: ./server
+    restart: unless-stopped
+    environment:
+      CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:8080}
+      JWT_SECRET: ${JWT_SECRET:-docker-dev-change-jwt-secret}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-0}
+      BOOTSTRAP_OWNER_EMAIL: ${BOOTSTRAP_OWNER_EMAIL:-}
+      BOOTSTRAP_OWNER_PASSWORD: ${BOOTSTRAP_OWNER_PASSWORD:-}
+    volumes:
+      - ecology_api_data:/app/app/data
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_ORIGIN:-http://localhost:8080}
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  edge:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+      - web
+
+volumes:
+  ecology_api_data:

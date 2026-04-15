@@ -42,11 +42,70 @@ function distanceIsMissing(km: number | null | undefined): boolean {
 const DISTANCE_NOT_CALCULATED_NOTE = "Расстояние не удалось рассчитать";
 
 /** Перенос строки после почтового индекса (6 цифр в начале), типично для адресов РБ. */
-function formatAddressDisplay(address: string | null | undefined): ReactNode {
+function extractAddressHintFromText(text: string): string | null {
+  const m = text.match(
+    /\b(ул\.|улица|пер\.|просп\.|б-р|шоссе|аг\.|д\.|дер\.)\s*[^,;]+(?:,\s*[^,;]+){0,3}/i,
+  );
+  if (!m) return null;
+  return m[0]
+    .replace(/\s+/g, " ")
+    .replace(/\s+,/g, ",")
+    .replace(/\b(предприятие|использует|принимает)\b.*$/i, "")
+    .trim()
+    .replace(/[,\s]+$/g, "");
+}
+
+function extractCityFromText(text: string): string | null {
+  const t = (text || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ");
+  const m = t.match(/\bг\.\s*([А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2})/);
+  if (!m) return null;
+  return m[1].replace(/[,\s]+$/g, "").trim() || null;
+}
+
+function repairSuspiciousAddress(address: string, owner: string, objectName: string): string {
+  const compact = address.replace(/\s+/g, " ").trim();
+  const badByCityNum = /^\d{6},?\s*г\.\s*\d+\s*$/i.test(compact);
+  const badByTruncatedCity = /^\d{6},?.*[, ]г\.\s*$/i.test(compact);
+  const hasTruncatedCitySuffix = /(?:,\s*|\s+)г\.\s*$/i.test(compact);
+  if (!badByCityNum && !badByTruncatedCity && !hasTruncatedCitySuffix) return compact;
+
+  const postal = (compact.match(/\b\d{6}\b/) || [])[0];
+  if (!postal) {
+    if (hasTruncatedCitySuffix) return compact.replace(/(?:,\s*|\s+)г\.\s*$/i, "").trim();
+    return compact;
+  }
+
+  const city = extractCityFromText(owner || "") || extractCityFromText(objectName || "");
+  if (city) {
+    const base = compact.replace(/(?:,\s*|\s+)г\.\s*$/i, "").replace(/[,\s]+$/g, "");
+    return `${base}, г. ${city}`;
+  }
+
+  const hint =
+    extractAddressHintFromText(owner || "") || extractAddressHintFromText(objectName || "");
+  if (!hint) return compact;
+  return `${postal}, ${hint}`.replace(/(?:,\s*|\s+)г\.\s*$/i, "").replace(/[,\s]+$/g, "");
+}
+
+function formatAddressDisplay(address: string | null | undefined, owner: string, objectName: string): ReactNode {
   const raw = address?.trim();
   if (!raw) return EM_DASH;
-  const m = raw.match(/^(\d{6})\s*,\s*(.+)$/);
+
+  // Нормализация «г.8» -> «г. 8», «д.12» -> «д. 12» и лишних пробелов.
+  const normalized = repairSuspiciousAddress(
+    raw
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/([А-Яа-яA-Za-z])\.(\d)/g, "$1. $2")
+    .trim(),
+    owner,
+    objectName,
+  );
+
+  const m = normalized.match(/^(\d{6})\s*,\s*(.+)$/);
   if (m) {
+    // Для очень короткого хвоста (например, "г. 8") не уводим на отдельную строку.
+    if (m[2].length < 9) return `${m[1]}, ${m[2]}`;
     return (
       <>
         <span className="block">{m[1]},</span>
@@ -54,8 +113,9 @@ function formatAddressDisplay(address: string | null | undefined): ReactNode {
       </>
     );
   }
-  const m2 = raw.match(/^(\d{6})\s+(?=\S)(.+)$/);
+  const m2 = normalized.match(/^(\d{6})\s+(?=\S)(.+)$/);
   if (m2) {
+    if (m2[2].length < 9) return `${m2[1]} ${m2[2]}`;
     return (
       <>
         <span className="block">{m2[1]}</span>
@@ -63,7 +123,7 @@ function formatAddressDisplay(address: string | null | undefined): ReactNode {
       </>
     );
   }
-  return raw;
+  return normalized;
 }
 
 function dedupePhoneLines(lines: string[]): string[] {
@@ -76,6 +136,55 @@ function dedupePhoneLines(lines: string[]): string[] {
     out.push(line);
   }
   return out;
+}
+
+function formatOwnerDisplay(owner: string | null | undefined): string {
+  const raw = (owner || "").replace(/\u00a0/g, " ").trim();
+  if (!raw) return EM_DASH;
+  let cleaned = raw
+    // Частый хвост из PDF-реестра.
+    .replace(
+      /\b\d{1,2}\s+[А-Яа-яA-Za-z]+(?:\s+\d{4})?\s*г\.\s*Страница\s*\d+\s*из\s*\d+\b.*$/gi,
+      "",
+    )
+    // Если встречается служебная фраза "Использует ...", срезаем всё с неё до конца:
+    // в колонке собственника это технический хвост из PDF.
+    .replace(/Использует[\s\S]*$/gi, "")
+    .replace(/Принимает[\s\S]*?собственные[\s\S]*?от[\s\S]*?других/gi, "")
+    .replace(/Использует[\s,;:]*Принимает[\s,;:]*собственные[\s,;:]*от[\s,;:]*других/gi, "")
+    .replace(/Принимает[\s,;:]*собственные[\s,;:]*от[\s,;:]*других/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  // Жёсткий предохранитель: если хвост всё ещё присутствует в любом виде,
+  // обрезаем строку собственника до первого служебного маркера.
+  const lowered = cleaned.toLowerCase();
+  const hasServiceTail = lowered.includes("собствен") && lowered.includes("друг") && lowered.includes("принима");
+  if (hasServiceTail) {
+    const idxUse = lowered.indexOf("использ");
+    const idxAccept = lowered.indexOf("принима");
+    const cut = [idxUse, idxAccept].filter((v) => v >= 0).sort((a, b) => a - b)[0];
+    if (cut != null && cut >= 0) {
+      cleaned = cleaned.slice(0, cut).trim();
+    }
+  }
+
+  // Точечная починка известного обрезанного наименования из реестра.
+  if (/НПЦ\s*НАН\s*Беларуси\s*по/i.test(cleaned)) {
+    cleaned = 'РУП "НПЦ НАН Беларуси по механизации сельского хозяйства"';
+  }
+  cleaned = cleaned.replace(
+    /(РУП\s*["«]НПЦ\s*НАН\s*Беларуси\s*по\s*механизации\s*сельского\s*хозяйства["»]?)\s+\d{6}[\s\S]*$/i,
+    "$1",
+  );
+
+  if (!cleaned) return EM_DASH;
+  const serviceOnly = cleaned
+    .replace(/\s+/g, " ")
+    .trim()
+    .match(/^(использует\s*)?(принимает\s*)?собственные\s*от\s*других\.?$/i);
+  if (serviceOnly) return EM_DASH;
+  return cleaned;
 }
 
 /** Несколько номеров через «;» — каждый с новой строки, нормализация и читаемые группы цифр. */
@@ -506,7 +615,7 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
 
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="flex min-w-0 flex-1 flex-col gap-2">
-            <span className="text-xs font-medium uppercase tracking-wide text-emerald-800/50">
+            <span className="text-xs font-medium uppercase tracking-wide text-black">
               Код / вид отходов
             </span>
             <div
@@ -552,12 +661,6 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
                 После выбора точки на карте появится ориентировочное расстояние до объектов по их адресам.
               </p>
             ) : null}
-            {distancesMissingForAllRows ? (
-              <p className="text-[11px] leading-snug text-amber-800/90">
-                Не удалось получить координаты по адресам этих записей (Nominatim). Проверьте адреса в PDF или попробуйте
-                позже; при необходимости увеличьте лимит запросов: переменная REGISTRY_SEARCH_GEOCODE_MAX на сервере.
-              </p>
-            ) : null}
           </div>
         </div>
       </section>
@@ -586,7 +689,7 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
           </div>
         ) : null}
         <div
-          className={`hidden gap-4 px-4 text-xs font-semibold uppercase tracking-wide text-emerald-800/45 sm:grid ${RESULT_GRID}`}
+          className={`hidden gap-4 px-4 text-xs font-semibold uppercase tracking-wide text-emerald-800/70 sm:grid ${RESULT_GRID}`}
         >
           <span>Код объекта</span>
           <span>Собственник</span>
@@ -611,7 +714,9 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
                 className={`grid grid-cols-1 gap-3 rounded-2xl border border-emerald-100/90 bg-white/95 p-4 shadow-sm shadow-emerald-900/5 ${RESULT_GRID} sm:items-start sm:gap-4`}
               >
                 <div className="text-sm font-semibold text-emerald-900/90 sm:pt-0.5 sm:text-base">{row.id}</div>
-                <div className="min-w-0 text-base leading-snug text-stone-800 sm:pt-0.5">{row.owner}</div>
+                <div className="min-w-0 text-base leading-snug text-stone-800 sm:pt-0.5">
+                  {formatOwnerDisplay(row.owner)}
+                </div>
                 <div className="flex min-w-0 flex-col gap-2 rounded-xl border border-emerald-100/70 bg-emerald-50/70 px-3 py-2.5 text-base leading-snug text-stone-800">
                   <span>{row.object_name}</span>
                   {row.accepts_external_waste !== false ? (
@@ -625,7 +730,7 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
                     Адрес объекта
                   </span>
                   <div className="rounded-xl border border-emerald-100/70 bg-emerald-50/40 px-3 py-2 text-base leading-relaxed text-stone-800">
-                    {formatAddressDisplay(row.address)}
+                    {formatAddressDisplay(row.address, row.owner, row.object_name)}
                   </div>
                 </div>
                 <div className="min-w-0">
@@ -648,7 +753,7 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
                     {formatDistance(row.distance_km)}
                   </span>
                   {row.distance_note?.trim() ? (
-                    <span className="max-w-[14rem] text-right text-[13px] leading-snug text-emerald-900/55 sm:max-w-[10rem]">
+                    <span className="max-w-[14rem] text-right text-[13px] leading-snug text-black sm:max-w-[10rem]">
                       {row.distance_note.trim()}
                     </span>
                   ) : locationChosen &&

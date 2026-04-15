@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-
 from app.deps import attach_session_cookie, clear_session_cookie, create_access_token, get_current_user
 from app.schemas import AuthSessionResponse, LoginRequest, RegisterRequest, UserOut
 from app.services.auth_users import (
     UserRecord,
     get_user_by_email,
+    get_user_by_id,
     is_bootstrap_owner_user,
     register_user,
+    touch_user_last_seen,
     verify_password,
 )
 
@@ -20,7 +21,9 @@ def _to_user_out(u: UserRecord) -> UserOut:
         name=u.name,
         role=u.role,
         created_at=u.created_at,
+        last_seen_at=u.last_seen_at,
         blocked=u.blocked,
+        subscription_active=u.subscription_active,
         protected_account=is_bootstrap_owner_user(u),
     )
 
@@ -49,6 +52,10 @@ async def login(body: LoginRequest, response: Response) -> AuthSessionResponse:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Доступ к сервису заблокирован",
         )
+    touch_user_last_seen(user.id, force=True)
+    user = get_user_by_id(user.id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Внутренняя ошибка")
     token = create_access_token(user)
     attach_session_cookie(response, token)
     return AuthSessionResponse(user=_to_user_out(user))

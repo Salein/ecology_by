@@ -195,7 +195,11 @@ export type AdminUserRow = {
   name: string;
   role: "user" | "admin";
   created_at: string;
+  /** ISO UTC, обновляется при входе и при активности в приложении (не чаще ~5 мин) */
+  last_seen_at: string | null;
   blocked: boolean;
+  /** Подписка активна (в т.ч. включена администратором) */
+  subscription_active: boolean;
   /** Учётная запись владельца (BOOTSTRAP_OWNER_EMAIL) — удалять нельзя */
   protected_account: boolean;
 };
@@ -209,6 +213,7 @@ export async function fetchAdminUsers(): Promise<AdminUserRow[]> {
 export type AdminUserPatch = {
   role?: "user" | "admin";
   blocked?: boolean;
+  subscription_active?: boolean;
 };
 
 export async function patchAdminUser(userId: number, patch: AdminUserPatch): Promise<AdminUserRow> {

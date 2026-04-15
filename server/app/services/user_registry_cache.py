@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import pdfplumber
+from app.services.registry_record_parser import repair_registry_address
 
 _DATA = Path(__file__).resolve().parent.parent / "data"
 USER_CACHE_PATH = _DATA / "user_registry_cache.json"
@@ -73,11 +75,81 @@ def dedupe_registry_records_by_id(records: list[dict[str, Any]]) -> list[dict[st
     return out
 
 
+_POSTAL_CITY_RE = re.compile(r"\b(\d{6})\b[\s,;:\-–—]{0,40}\bг\.\s*([А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2})")
+
+
+def _build_postal_city_map(rows: list[dict[str, Any]]) -> dict[str, str]:
+    """
+    Извлекает вероятный город по индексу на основе всех текстов карточек.
+    Если по индексу встречается несколько городов с сопоставимой частотой, индекс пропускаем.
+    """
+    stats: dict[str, dict[str, int]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        texts = [
+            str(row.get("address") or ""),
+            str(row.get("owner") or ""),
+            str(row.get("object_name") or ""),
+        ]
+        for text in texts:
+            t = text.replace("\xa0", " ")
+            for m in _POSTAL_CITY_RE.finditer(t):
+                postal = m.group(1)
+                city = re.sub(r"[,\s]+$", "", m.group(2)).strip()
+                if len(city) < 2:
+                    continue
+                by_city = stats.setdefault(postal, {})
+                by_city[city] = by_city.get(city, 0) + 1
+
+    out: dict[str, str] = {}
+    for postal, by_city in stats.items():
+        if not by_city:
+            continue
+        ranked = sorted(by_city.items(), key=lambda x: x[1], reverse=True)
+        best_city, best_count = ranked[0]
+        second_count = ranked[1][1] if len(ranked) > 1 else 0
+        # Берём город только если он уверенно доминирует по этому индексу.
+        if best_count >= 2 and best_count >= second_count + 2:
+            out[postal] = best_city
+    return out
+
+
+def _repair_truncated_city_suffix(address: str, postal_to_city: dict[str, str]) -> str:
+    compact = re.sub(r"\s+", " ", (address or "").replace("\xa0", " ")).strip()
+    if not compact:
+        return compact
+    if not re.search(r"(?:,\s*|\s+)г\.\s*$", compact, flags=re.IGNORECASE):
+        return compact
+    pm = re.search(r"\b(\d{6})\b", compact)
+    if not pm:
+        return re.sub(r"(?:,\s*|\s+)г\.\s*$", "", compact, flags=re.IGNORECASE).strip()
+    postal = pm.group(1)
+    city = postal_to_city.get(postal)
+    if not city:
+        return re.sub(r"(?:,\s*|\s+)г\.\s*$", "", compact, flags=re.IGNORECASE).strip()
+    base = re.sub(r"(?:,\s*|\s+)г\.\s*$", "", compact, flags=re.IGNORECASE).strip().rstrip(",")
+    return f"{base}, г. {city}"
+
+
 def load_cached_registry_records() -> list[dict[str, Any]]:
     data = _load_json(USER_CACHE_PATH)
     if not data or not isinstance(data.get("records"), list):
         return []
-    return dedupe_registry_records_by_id(list(data["records"]))
+    rows = dedupe_registry_records_by_id(list(data["records"]))
+    postal_to_city = _build_postal_city_map(rows)
+    # Мягкая починка старого кэша: исправляем явно битые адресные хвосты.
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        addr = str(row.get("address") or "").strip()
+        if not addr:
+            continue
+        owner = str(row.get("owner") or "")
+        obj = str(row.get("object_name") or "")
+        repaired = repair_registry_address(addr, owner, obj)
+        row["address"] = _repair_truncated_city_suffix(repaired, postal_to_city)
+    return rows
 
 
 def cache_meta() -> dict[str, Any] | None:

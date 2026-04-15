@@ -1,5 +1,5 @@
 /**
- * Флаговая cookie на домене Next.js — только для middleware (редирект на /).
+ * Флаговая cookie на домене Next.js — только для proxy (редирект на /).
  * Сессия и JWT хранятся на API в HttpOnly cookie; регистрационные данные — только в БД/файле на сервере.
  */
 export const SESSION_GATE_COOKIE = "ecology_has_session";

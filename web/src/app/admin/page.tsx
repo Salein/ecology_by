@@ -10,6 +10,20 @@ function cloneUserRows(list: AdminUserRow[]): AdminUserRow[] {
   return list.map((r) => ({ ...r }));
 }
 
+/** ISO из API (UTC) → дата и время в локали браузера */
+function formatUserDateTime(iso: string | null | undefined): string {
+  if (iso == null || String(iso).trim() === "") return "—";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "—";
+  return new Date(t).toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export default function AdminPage() {
   const { user, loading, logout } = useAuth();
   const router = useRouter();
@@ -58,17 +72,23 @@ export default function AdminPage() {
     return rows.some((r) => {
       const s = byId.get(r.id);
       if (!s) return true;
-      if (r.role !== s.role) return true;
-      /* у своей строки и у владельца (bootstrap) доступ не редактируется — только роль */
       if (r.id === user.id) return false;
       if (r.protected_account) return false;
+      if (r.role !== s.role) return true;
+      /* у своей строки и у владельца (bootstrap) доступ не редактируется */
       return r.blocked !== s.blocked;
     });
   }, [rows, savedRows, user]);
 
   function setDraftRole(uid: number, role: "user" | "admin") {
     setErr(null);
-    setRows((prev) => prev.map((r) => (r.id === uid ? { ...r, role } : r)));
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r.id !== uid) return r;
+        if (user && (r.id === user.id || r.protected_account)) return r;
+        return { ...r, role };
+      }),
+    );
   }
 
   function setDraftBlocked(uid: number, blocked: boolean) {
@@ -87,16 +107,22 @@ export default function AdminPage() {
         if (!prev) continue;
         const isSelf = user != null && r.id === user.id;
         if (isSelf) {
-          if (prev.role === r.role) continue;
-          await patchAdminUser(r.id, { role: r.role });
+          const patch: { role?: "user" | "admin" } = {};
+          if (prev.role !== r.role) patch.role = r.role;
+          if (Object.keys(patch).length === 0) continue;
+          await patchAdminUser(r.id, patch);
           continue;
         }
         if (r.protected_account) {
-          if (prev.role === r.role) continue;
-          await patchAdminUser(r.id, { role: r.role });
+          const patch: { role?: "user" | "admin" } = {};
+          if (prev.role !== r.role) patch.role = r.role;
+          if (Object.keys(patch).length === 0) continue;
+          await patchAdminUser(r.id, patch);
           continue;
         }
-        if (prev.role === r.role && prev.blocked === r.blocked) continue;
+        if (prev.role === r.role && prev.blocked === r.blocked) {
+          continue;
+        }
         const patch: { role?: "user" | "admin"; blocked?: boolean } = {};
         if (prev.role !== r.role) patch.role = r.role;
         if (prev.blocked !== r.blocked) patch.blocked = r.blocked;
@@ -140,7 +166,7 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-10 sm:px-6">
+    <div className="mx-auto flex w-full flex-col gap-6 px-4 py-10 sm:px-6 lg:px-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold text-emerald-950">Админ-панель</h1>
@@ -170,12 +196,14 @@ export default function AdminPage() {
 
       {err ? <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{err}</p> : null}
 
-      <div className="overflow-x-auto rounded-2xl border border-emerald-100/90 bg-white/95 shadow-sm">
-        <table className="w-full min-w-[36rem] text-left text-sm">
+      <div className="w-full rounded-2xl border border-emerald-100/90 bg-white/95 shadow-sm">
+        <table className="w-full min-w-0 table-auto text-left text-sm">
           <thead className="border-b border-emerald-100 bg-emerald-50/80 text-xs font-semibold uppercase tracking-wide text-emerald-800/60">
             <tr>
               <th className="px-4 py-3">Имя</th>
               <th className="px-4 py-3">Почта</th>
+              <th className="whitespace-nowrap px-4 py-3">Дата регистрации</th>
+              <th className="whitespace-nowrap px-4 py-3">Последний визит</th>
               <th className="px-4 py-3">Роль</th>
               <th className="px-4 py-3">Доступ</th>
               <th className="w-28 px-4 py-3">Действия</th>
@@ -184,13 +212,13 @@ export default function AdminPage() {
           <tbody>
             {loadingList ? (
               <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-emerald-800/50">
+                <td colSpan={7} className="px-4 py-8 text-center text-emerald-800/50">
                   Загрузка…
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-emerald-800/50">
+                <td colSpan={7} className="px-4 py-8 text-center text-emerald-800/50">
                   Нет пользователей
                 </td>
               </tr>
@@ -199,9 +227,30 @@ export default function AdminPage() {
                 const isSelf = user.id === r.id;
                 return (
                   <tr key={r.id} className="border-b border-emerald-50/90 last:border-0">
-                    <td className="px-4 py-3 font-medium text-stone-800">{r.name || "—"}</td>
-                    <td className="px-4 py-3 text-stone-700">{r.email}</td>
+                    <td className="min-w-0 px-4 py-3 font-medium text-stone-800">{r.name || "—"}</td>
+                    <td className="min-w-0 break-words px-4 py-3 text-stone-700">{r.email}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-stone-600 tabular-nums">
+                      {formatUserDateTime(r.created_at)}
+                    </td>
+                    <td
+                      className="whitespace-nowrap px-4 py-3 text-stone-600 tabular-nums"
+                      title="Обновляется при входе и при работе в приложении (не чаще нескольких минут)"
+                    >
+                      {formatUserDateTime(r.last_seen_at)}
+                    </td>
                     <td className="px-4 py-3">
+                      {isSelf || r.protected_account ? (
+                        <span
+                          className="text-sm text-emerald-800/70"
+                          title={
+                            r.protected_account && !isSelf
+                              ? "Роль владельца системы всегда администратор"
+                              : "Нельзя менять свою роль"
+                          }
+                        >
+                          Администратор
+                        </span>
+                      ) : (
                       <select
                         value={r.role}
                         disabled={saving || deletingId != null}
@@ -211,6 +260,7 @@ export default function AdminPage() {
                         <option value="user">Пользователь</option>
                         <option value="admin">Администратор</option>
                       </select>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       {isSelf || r.protected_account ? (

@@ -7,7 +7,7 @@ from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import settings
-from app.services.auth_users import UserRecord, get_user_by_id
+from app.services.auth_users import UserRecord, get_user_by_id, touch_user_last_seen
 
 security = HTTPBearer(auto_error=False)
 
@@ -93,6 +93,7 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Доступ к сервису заблокирован",
         )
+    touch_user_last_seen(user.id, force=False)
     return user
 
 

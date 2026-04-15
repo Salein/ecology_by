@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,7 +32,9 @@ class UserRecord:
     password_hash: str
     role: Role
     created_at: str
+    last_seen_at: str | None = None
     blocked: bool = False
+    subscription_active: bool = False
 
     def to_public(self) -> dict[str, Any]:
         return {
@@ -41,12 +43,17 @@ class UserRecord:
             "name": self.name,
             "role": self.role,
             "created_at": self.created_at,
+            "last_seen_at": self.last_seen_at,
             "blocked": self.blocked,
+            "subscription_active": self.subscription_active,
         }
 
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_LAST_SEEN_TOUCH_INTERVAL = timedelta(minutes=5)
 
 
 def _load_store() -> dict[str, Any]:
@@ -74,6 +81,12 @@ def _row_to_record(row: dict[str, Any]) -> UserRecord:
     if role not in ("user", "admin"):
         role = "user"
     blocked = bool(row.get("blocked", False))
+    # Подписка и доступ связаны: активная подписка ⇔ доступ не закрыт
+    subscription_active = not blocked
+    raw_seen = row.get("last_seen_at")
+    last_seen: str | None = None
+    if isinstance(raw_seen, str) and raw_seen.strip():
+        last_seen = raw_seen.strip()
     return UserRecord(
         id=int(row["id"]),
         email=str(row["email"]),
@@ -81,7 +94,9 @@ def _row_to_record(row: dict[str, Any]) -> UserRecord:
         password_hash=str(row["password_hash"]),
         role=role,  # type: ignore[arg-type]
         created_at=str(row.get("created_at") or ""),
+        last_seen_at=last_seen,
         blocked=blocked,
+        subscription_active=subscription_active,
     )
 
 
@@ -126,6 +141,44 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
+def touch_user_last_seen(user_id: int, *, force: bool = False) -> None:
+    """
+    Обновляет время последней активности. По умолчанию не чаще раза в несколько минут,
+    чтобы не перезаписывать JSON при каждом запросе API.
+    """
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    data = _load_store()
+    users = data.get("users") or []
+    if not isinstance(users, list):
+        return
+    for i, row in enumerate(users):
+        if not isinstance(row, dict):
+            continue
+        try:
+            rid = int(row.get("id", -1))
+        except (TypeError, ValueError):
+            continue
+        if rid != user_id:
+            continue
+        if not force:
+            prev = row.get("last_seen_at")
+            if isinstance(prev, str) and prev.strip():
+                try:
+                    p = datetime.fromisoformat(prev.replace("Z", "+00:00"))
+                    if p.tzinfo is None:
+                        p = p.replace(tzinfo=timezone.utc)
+                    if now - p < _LAST_SEEN_TOUCH_INTERVAL:
+                        return
+                except (ValueError, TypeError, OverflowError):
+                    pass
+        row["last_seen_at"] = now_iso
+        users[i] = row
+        data["users"] = users
+        _save_store(data)
+        return
+
+
 def register_user(email: str, password: str, name: str) -> UserRecord:
     email_n = email.strip().lower()
     if get_user_by_email(email_n):
@@ -139,14 +192,17 @@ def register_user(email: str, password: str, name: str) -> UserRecord:
     next_id = int(data.get("next_id") or 1)
     # первый зарегистрированный пользователь — администратор
     role: Role = "admin" if not users else "user"
+    created = _utc_iso()
     rec = {
         "id": next_id,
         "email": email_n,
         "name": name_s,
         "password_hash": hash_password(password),
         "role": role,
-        "created_at": _utc_iso(),
+        "created_at": created,
+        "last_seen_at": created,
         "blocked": False,
+        "subscription_active": True,
     }
     users.append(rec)
     data["users"] = users
@@ -177,6 +233,7 @@ def ensure_bootstrap_owner_account(email: str, password: str) -> None:
             row["password_hash"] = ph
             row["role"] = "admin"
             row["blocked"] = False
+            row["subscription_active"] = True
             users[i] = row
             data["users"] = users
             _save_store(data)
@@ -184,14 +241,17 @@ def ensure_bootstrap_owner_account(email: str, password: str) -> None:
 
     next_id = int(data.get("next_id") or 1)
     name_s = email_n.split("@")[0] or "Admin"
+    created = _utc_iso()
     rec = {
         "id": next_id,
         "email": email_n,
         "name": name_s,
         "password_hash": ph,
         "role": "admin",
-        "created_at": _utc_iso(),
+        "created_at": created,
+        "last_seen_at": created,
         "blocked": False,
+        "subscription_active": True,
     }
     users.append(rec)
     data["users"] = users
@@ -204,8 +264,9 @@ def update_user_admin(
     *,
     role: Role | None = None,
     blocked: bool | None = None,
+    subscription_active: bool | None = None,
 ) -> UserRecord | None:
-    if role is None and blocked is None:
+    if role is None and blocked is None and subscription_active is None:
         return None
     data = _load_store()
     users = data.get("users") or []
@@ -216,10 +277,23 @@ def update_user_admin(
             continue
         if int(row.get("id", -1)) != user_id:
             continue
-        if role is not None:
+        rec_check = _row_to_record(row)
+        if is_bootstrap_owner_user(rec_check):
+            row["role"] = "admin"
+        elif role is not None:
             row["role"] = role
-        if blocked is not None:
-            row["blocked"] = blocked
+        rec_check = _row_to_record(row)
+        if is_bootstrap_owner_user(rec_check):
+            row["blocked"] = False
+            row["subscription_active"] = True
+        elif subscription_active is not None:
+            row["subscription_active"] = bool(subscription_active)
+            row["blocked"] = not bool(subscription_active)
+        elif blocked is not None:
+            row["blocked"] = bool(blocked)
+            row["subscription_active"] = not bool(blocked)
+        else:
+            row["subscription_active"] = not bool(row.get("blocked", False))
         users[i] = row
         data["users"] = users
         _save_store(data)

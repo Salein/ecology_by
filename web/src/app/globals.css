@@ -1,8 +1,7 @@
 @import "tailwindcss";
 
 :root {
-  /* лёгкий мятный фон для экологической темы */
-  --background: #f2f8f5;
+  --background: #ffffff;
   --foreground: #14532d;
 }
 
@@ -13,8 +12,13 @@
   --font-mono: var(--font-geist-mono);
 }
 
+html {
+  background: #ffffff;
+}
+
 body {
-  background: var(--background);
+  min-height: 100%;
+  background: #ffffff;
   color: var(--foreground);
 }
 

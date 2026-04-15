@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from typing import Any
 
 from app.config import settings
@@ -62,6 +63,10 @@ def _resolve_coords_no_network(
 
 
 _DISTANCE_NOTE_APPROX = "Ориентир по названию населённого пункта или области в адресе"
+_WARMUP_LOCK = threading.Lock()
+_WARMUP_IN_PROGRESS = False
+_WARMUP_COOLDOWN_SEC = 12.0
+_WARMUP_LAST_STARTED_AT = 0.0
 
 
 def _resolve_coords_for_distance(
@@ -93,7 +98,6 @@ def _geocode_pair_with_nominatim(q: str, delay_sec: float) -> tuple[float, float
         pair = forward_geocode_sync_relaxed(q)
     except Exception:
         pair = None
-    time.sleep(delay_sec)
     return pair
 
 
@@ -128,6 +132,51 @@ def _geocode_address_into_cache(
     la, lo = float(pair[0]), float(pair[1])
     geocache[key] = {"lat": la, "lon": lo}
     return la, lo, True, True
+
+
+def _start_async_geocache_warmup(filtered_rows: list[dict[str, Any]], delay_sec: float, max_on_demand: int) -> None:
+    """
+    Фоновый догрев geocode_cache, чтобы текущий ответ не блокировался ожиданием Nominatim.
+    Запускается не чаще, чем раз в _WARMUP_COOLDOWN_SEC, и только одним воркером одновременно.
+    """
+    if max_on_demand <= 0:
+        return
+
+    global _WARMUP_IN_PROGRESS, _WARMUP_LAST_STARTED_AT
+    now = time.perf_counter()
+    with _WARMUP_LOCK:
+        if _WARMUP_IN_PROGRESS:
+            return
+        if now - _WARMUP_LAST_STARTED_AT < _WARMUP_COOLDOWN_SEC:
+            return
+        _WARMUP_IN_PROGRESS = True
+        _WARMUP_LAST_STARTED_AT = now
+
+    def _worker() -> None:
+        global _WARMUP_IN_PROGRESS
+        try:
+            geocache = load_geocode_cache()
+            geocache_dirty = False
+            api_calls = 0
+            for row in filtered_rows:
+                if api_calls >= max_on_demand:
+                    break
+                la, lo = _resolve_coords_no_network(row, geocache)
+                if la is not None:
+                    continue
+                _la, _lo, attempted, updated = _geocode_address_into_cache(row, geocache, delay_sec)
+                if attempted:
+                    api_calls += 1
+                if updated:
+                    geocache_dirty = True
+            if geocache_dirty:
+                save_geocode_cache(geocache)
+        finally:
+            with _WARMUP_LOCK:
+                _WARMUP_IN_PROGRESS = False
+
+    t = threading.Thread(target=_worker, name="geocache-warmup", daemon=True)
+    t.start()
 
 
 def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
@@ -181,24 +230,8 @@ def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
 
     scored.sort(key=lambda x: x[0])
 
-    api_calls = 0
-    for row in filtered:
-        if max_on_demand <= 0 or api_calls >= max_on_demand:
-            break
-        rid = int(row["id"])
-        if rid in scored_ids:
-            continue
-        la, lo, attempted, updated = _geocode_address_into_cache(row, geocache, delay)
-        if attempted:
-            api_calls += 1
-        if updated:
-            geocache_dirty = True
-        if la is not None:
-            d = haversine_km(ulat, ulon, la, lo)
-            scored.append((d, row))
-            scored_ids.add(rid)
-
-    scored.sort(key=lambda x: x[0])
+    # Не блокируем ответ сетью: on-demand геокодирование уходит в фон.
+    _start_async_geocache_warmup(filtered, delay, max_on_demand)
 
     picked: list[dict[str, Any]] = [r for _, r in scored[:limit]]
     picked_ids = {int(r["id"]) for r in picked}

@@ -14,6 +14,10 @@ OBJECT_START = re.compile(r"^Объект\s*(\d+)\s*(.*)$")
 OWNER_START = re.compile(r"^Собственник\s*(.*)$")
 POSTAL = re.compile(r"\b(\d{6}),\s*")
 ADDR_UL = re.compile(r"\d{6},\s*ул\.")
+ADDR_HINT = re.compile(
+    r"\b(ул\.|улица|пер\.|просп\.|б-р|шоссе|аг\.|д\.|дер\.)\s*[^,;]+(?:,\s*[^,;]+){0,3}",
+    re.IGNORECASE,
+)
 
 
 def _trim_tail_noise(s: str) -> str:
@@ -26,6 +30,47 @@ def _trim_tail_noise(s: str) -> str:
     ):
         s = re.split(pat, s, maxsplit=1, flags=re.IGNORECASE)[0].strip()
     return s
+
+
+def _extract_address_hint(s: str) -> str | None:
+    text = re.sub(r"\s+", " ", (s or "").replace("\xa0", " ")).strip()
+    if not text:
+        return None
+    m = ADDR_HINT.search(text)
+    if not m:
+        return None
+    hint = m.group(0)
+    hint = re.sub(r"\b(предприятие|использует|принимает)\b.*$", "", hint, flags=re.IGNORECASE).strip()
+    hint = re.sub(r"[,\s]+$", "", hint)
+    return hint or None
+
+
+def repair_registry_address(address: str, owner_text: str, object_text: str) -> str:
+    """
+    Исправляет очевидно битые адреса после OCR/разрезания PDF, например:
+    - "222310, г.8"
+    - "222310, ..., г."
+    Если в owner/object есть более информативный адресный хвост (ул./аг./д./...),
+    подставляет его, сохраняя почтовый индекс.
+    """
+    compact = re.sub(r"\s+", " ", (address or "").replace("\xa0", " ")).strip()
+    if not compact:
+        return compact
+    compact = re.sub(r"([А-Яа-яA-Za-z])\.(\d)", r"\1. \2", compact)
+
+    bad_city_num = bool(re.match(r"^\d{6},?\s*г\.\s*\d+\s*$", compact, flags=re.IGNORECASE))
+    bad_truncated_city = bool(re.match(r"^\d{6},?.*[, ]г\.\s*$", compact, flags=re.IGNORECASE))
+    if not bad_city_num and not bad_truncated_city:
+        return compact
+
+    pm = re.search(r"\b\d{6}\b", compact)
+    if not pm:
+        return compact
+    postal = pm.group(0)
+    hint = _extract_address_hint(owner_text) or _extract_address_hint(object_text)
+    if not hint:
+        return compact
+    return f"{postal}, {hint}"
 
 
 def extract_name_address_multiline(blob: str) -> tuple[str, str]:
@@ -220,6 +265,7 @@ def parse_registry_plain_text(full_text: str, source_part: int) -> list[dict[str
             address = _trim_tail_noise(address)
             if len(address) < 8:
                 address = addr_obj or addr_own or owner_blob
+            address = repair_registry_address(address, owner_blob, object_blob)
 
             phones = extract_phones_from_text(object_blob, owner_blob)
 

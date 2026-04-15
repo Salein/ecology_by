@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  /** Образ Docker: минимальный runtime (`node server.js`) */
+  output: "standalone",
   turbopack: {
     root: process.cwd(),
   },

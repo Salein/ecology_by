@@ -4,6 +4,42 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 
+function clearFieldValidity(e: React.ChangeEvent<HTMLInputElement>) {
+  e.currentTarget.setCustomValidity("");
+}
+
+/** Вызывать перед checkValidity/reportValidity — иначе браузер показывает англ. «Please fill out this field». */
+function applyRussianValidity(mode: "login" | "register", form: HTMLFormElement) {
+  const name = form.querySelector<HTMLInputElement>('input[name="name"]');
+  const email = form.querySelector<HTMLInputElement>('input[name="email"]');
+  const password = form.querySelector<HTMLInputElement>('input[name="password"]');
+
+  if (name && mode === "register") {
+    name.setCustomValidity("");
+    if (name.validity.valueMissing || name.value.trim().length === 0) {
+      name.setCustomValidity("Укажите имя.");
+    }
+  }
+  if (email) {
+    email.setCustomValidity("");
+    if (email.validity.valueMissing) {
+      email.setCustomValidity("Укажите адрес электронной почты.");
+    } else if (email.validity.typeMismatch) {
+      email.setCustomValidity(
+        "Введите корректный адрес: нужен символ «@» и домен после него, например имя@example.com"
+      );
+    }
+  }
+  if (password) {
+    password.setCustomValidity("");
+    if (password.validity.valueMissing) {
+      password.setCustomValidity("Введите пароль.");
+    } else if (mode === "register" && password.validity.tooShort) {
+      password.setCustomValidity("Пароль должен содержать не менее 8 символов.");
+    }
+  }
+}
+
 export function WelcomePage() {
   const { user, loading, login, register } = useAuth();
   const router = useRouter();
@@ -18,8 +54,15 @@ export function WelcomePage() {
     if (!loading && user) router.replace("/app");
   }, [loading, user, router]);
 
-  async function onSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    const form = e.currentTarget;
+    applyRussianValidity(mode, form);
+    if (!form.checkValidity()) {
+      form.reportValidity();
+      return;
+    }
+
     setError(null);
     setBusy(true);
     try {
@@ -48,10 +91,8 @@ export function WelcomePage() {
   return (
     <div className="mx-auto flex w-full max-w-lg flex-col gap-8 px-4 py-16 sm:px-6">
       <div className="text-center">
-        <h1 className="text-3xl font-semibold tracking-tight text-emerald-950">Экология</h1>
-        <p className="mt-2 text-sm text-emerald-900/60">
-          Поиск объектов обращения с отходами. Войдите или зарегистрируйтесь для доступа к приложению.
-        </p>
+        <h2 className="text-3xl font-semibold tracking-tight text-emerald-950">Вход в систему</h2>
+        <p className="mt-2 text-sm text-emerald-900/60">Войдите или зарегистрируйтесь для доступа к системе.</p>
       </div>
 
       <div className="flex rounded-2xl border border-emerald-100/90 bg-emerald-50/40 p-1 shadow-sm">
@@ -86,6 +127,7 @@ export function WelcomePage() {
       </div>
 
       <form
+        noValidate
         onSubmit={(e) => void onSubmit(e)}
         className="flex flex-col gap-4 rounded-2xl border border-emerald-100/90 bg-white/95 p-6 shadow-sm shadow-emerald-900/5"
       >
@@ -93,10 +135,15 @@ export function WelcomePage() {
           <label className="flex flex-col gap-1.5 text-sm">
             <span className="font-medium text-emerald-950">Имя</span>
             <input
+              name="name"
               type="text"
+              required
               autoComplete="name"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                clearFieldValidity(e);
+                setName(e.target.value);
+              }}
               className="rounded-xl border border-emerald-100 bg-white px-4 py-3 text-stone-800 outline-none ring-emerald-200/50 focus:border-emerald-300 focus:ring-2"
               placeholder="Как к вам обращаться"
             />
@@ -105,23 +152,31 @@ export function WelcomePage() {
         <label className="flex flex-col gap-1.5 text-sm">
           <span className="font-medium text-emerald-950">Электронная почта</span>
           <input
+            name="email"
             type="email"
             required
             autoComplete="email"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => {
+              clearFieldValidity(e);
+              setEmail(e.target.value);
+            }}
             className="rounded-xl border border-emerald-100 bg-white px-4 py-3 text-stone-800 outline-none ring-emerald-200/50 focus:border-emerald-300 focus:ring-2"
-            placeholder="you@example.com"
+            placeholder="почта@example.com"
           />
         </label>
         <label className="flex flex-col gap-1.5 text-sm">
           <span className="font-medium text-emerald-950">Пароль</span>
           <input
+            name="password"
             type="password"
             required
             autoComplete={mode === "login" ? "current-password" : "new-password"}
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) => {
+              clearFieldValidity(e);
+              setPassword(e.target.value);
+            }}
             className="rounded-xl border border-emerald-100 bg-white px-4 py-3 text-stone-800 outline-none ring-emerald-200/50 focus:border-emerald-300 focus:ring-2"
             placeholder={mode === "register" ? "Не менее 8 символов" : "••••••••"}
             minLength={mode === "register" ? 8 : undefined}
@@ -136,10 +191,6 @@ export function WelcomePage() {
           {busy ? "Подождите…" : mode === "login" ? "Войти" : "Зарегистрироваться"}
         </button>
       </form>
-
-      <p className="text-center text-xs text-emerald-800/50">
-        Первый зарегистрированный пользователь получает роль администратора и может загружать реестры.
-      </p>
     </div>
   );
 }
