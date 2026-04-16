@@ -4,9 +4,11 @@
 
 ## Требования
 
-- **Node.js** 20+ (для `web/`)
-- **Python** 3.11+ (для `server/`)
-- **PostgreSQL** 16+ (локально или в Docker)
+- **Docker** и **Docker Compose** (plugin `docker compose`) — для запуска всего стека одной командой
+- либо для разработки без Docker:
+  - **Node.js** 20+ (для `web/`)
+  - **Python** 3.11+ (для `server/`)
+  - **PostgreSQL** 16+
 - Интернет (тайлы карты, Nominatim при первичной загрузке реестра)
 
 ## Структура каталогов
@@ -15,6 +17,97 @@
 |-----------|------------|
 | `web/`    | Next.js 16, интерфейс |
 | `server/` | FastAPI, парсинг PDF, кэш |
+| `docker/` | Конфигурация nginx для режима «один URL» |
+| `docker-compose.yml` | Сервисы: PostgreSQL, API, фронт, nginx |
+
+## Запуск в Docker (весь проект)
+
+Один внешний порт (по умолчанию **8080**): nginx проксирует фронт и API (`/api/`, `/health`, `/docs`).
+
+### Что поднимается
+
+| Сервис | Роль |
+|--------|------|
+| `postgres` | PostgreSQL 16, данные в volume `ecology_postgres_data` |
+| `api` | FastAPI; при старте выполняется `python -m alembic upgrade head`, затем uvicorn |
+| `web` | Next.js (production build, `standalone`) |
+| `edge` | nginx, проброс порта на хост |
+
+### Подготовка (рекомендуется)
+
+В **корне репозитория** (рядом с `docker-compose.yml`) можно создать файл `.env` — переменные из него подхватит Compose.
+
+Пример (скопируйте и подставьте свои значения):
+
+```env
+# Обязательно смените в продакшене
+JWT_SECRET=длинный-случайный-секрет
+
+# Почта и пароль владельца (bootstrap-админ при старте API)
+BOOTSTRAP_OWNER_EMAIL=you@example.com
+BOOTSTRAP_OWNER_PASSWORD=не_менее_8_символов
+
+# URL, с которого пользователь открывает сайт (CORS + NEXT_PUBLIC_API_URL при сборке web)
+PUBLIC_ORIGIN=http://localhost:8080
+
+# Опционально: другой порт на хосте
+# HTTP_PORT=8080
+
+# Опционально: своя БД (по умолчанию postgres/postgres, БД ecology)
+# POSTGRES_USER=postgres
+# POSTGRES_PASSWORD=postgres
+# POSTGRES_DB=ecology
+```
+
+Строка `DATABASE_URL` для контейнера `api` **задаётся внутри** `docker-compose.yml` (хост `postgres`, порт `5432`); менять её нужно только если вы правите compose или выносите БД наружу.
+
+### Команды
+
+Сборка и запуск в фоне:
+
+```bash
+docker compose up --build -d
+```
+
+**Windows (PowerShell)** — то же самое из каталога с `docker-compose.yml`:
+
+```powershell
+cd D:\Projects\ecology
+docker compose up --build -d
+```
+
+Откройте в браузере: [http://localhost:8080](http://localhost:8080) (или `http://localhost:${HTTP_PORT}`).
+
+Проверка API через nginx:
+
+```bash
+curl http://localhost:8080/health
+```
+
+### Данные после первого запуска
+
+Таблицы создаются миграциями автоматически. Пользователей и кэш из старых JSON (если они лежат в volume `ecology_api_data` на пути `/app/app/data/` внутри API) можно один раз импортировать:
+
+```bash
+docker compose exec api python -m app.jobs.import_auth_users
+docker compose exec api python -m app.jobs.import_registry_cache
+```
+
+Вторую команду выполняйте только если нужны уже сохранённые `user_registry_cache.json` / `geocode_cache.json` из volume.
+
+### Логи и остановка
+
+```bash
+docker compose logs -f api
+docker compose logs -f edge
+docker compose down
+```
+
+Полный сброс контейнеров и **именованных** томов (удалит БД и файлы в `ecology_api_data`):
+
+```bash
+docker compose down -v
+```
 
 ## Запуск бэкенда (Python)
 
@@ -105,6 +198,9 @@ npm run dev
 
 | Команда | Где | Назначение |
 |--------|-----|------------|
+| `docker compose up --build -d` | корень репозитория | Сборка и запуск всего стека |
+| `docker compose down` | корень | Остановка контейнеров |
+| `docker compose logs -f api` | корень | Логи бэкенда |
 | `npm run lint` | `web/` | ESLint |
 | `npm run build` | `web/` | Сборка |
 
@@ -121,6 +217,8 @@ npm run dev
 
 ## Устранение неполадок
 
+- **Docker: порт 8080 занят** — задайте в `.env` у корня, например: `HTTP_PORT=8081`, затем `docker compose up -d` заново.
+- **Docker: API не стартует** — смотрите `docker compose logs api`: часто это недоступная БД до healthcheck; в compose для `postgres` включён `healthcheck`, `api` ждёт `service_healthy`.
 - **Нет строк в таблице** — загрузите реестр кнопкой на главной или проверьте, что API доступен.
 - **Долгая обработка** — нормально для полных реестров; геокодирование ограничено политикой Nominatim (`REGISTRY_GEOCODE_DELAY_SEC`).
 - **User-Agent** — задайте осмысленный `NOMINATIM_USER_AGENT` в окружении для продакшена.
