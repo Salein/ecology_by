@@ -215,18 +215,13 @@ def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
     geocache_dirty = False
 
     scored: list[tuple[float, dict[str, Any]]] = []
-    scored_ids: set[int] = set()
 
     for row in filtered:
-        rid = int(row["id"])
-        if rid in scored_ids:
-            continue
         la, lo, _approx = _resolve_coords_for_distance(row, geocache)
         if la is None:
             continue
         d = haversine_km(ulat, ulon, la, lo)
         scored.append((d, row))
-        scored_ids.add(rid)
 
     scored.sort(key=lambda x: x[0])
 
@@ -234,17 +229,12 @@ def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
     _start_async_geocache_warmup(filtered, delay, max_on_demand)
 
     picked: list[dict[str, Any]] = [r for _, r in scored[:limit]]
-    picked_ids = {int(r["id"]) for r in picked}
 
     if len(picked) < limit:
         for row in filtered:
             if len(picked) >= limit:
                 break
-            rid = int(row["id"])
-            if rid in picked_ids:
-                continue
             picked.append(row)
-            picked_ids.add(rid)
 
     if geocache_dirty:
         save_geocode_cache(geocache)

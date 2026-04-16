@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
-import { deleteAdminUser, fetchAdminUsers, patchAdminUser, type AdminUserRow } from "@/lib/api";
+import { clearRegistryCache, deleteAdminUser, fetchAdminUsers, patchAdminUser, type AdminUserRow } from "@/lib/api";
 
 function cloneUserRows(list: AdminUserRow[]): AdminUserRow[] {
   return list.map((r) => ({ ...r }));
@@ -35,6 +35,7 @@ export default function AdminPage() {
   const [loadingList, setLoadingList] = useState(true);
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [clearingCache, setClearingCache] = useState(false);
 
   const load = useCallback(async () => {
     setErr(null);
@@ -157,6 +158,21 @@ export default function AdminPage() {
     }
   }
 
+  async function clearRegistryCacheNow() {
+    if (!window.confirm("Очистить кэш реестра? После этого потребуется повторно загрузить PDF для восстановления данных.")) {
+      return;
+    }
+    setErr(null);
+    setClearingCache(true);
+    try {
+      await clearRegistryCache();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Не удалось очистить кэш реестра");
+    } finally {
+      setClearingCache(false);
+    }
+  }
+
   if (loading || !user || user.role !== "admin") {
     return (
       <div className="flex min-h-[40vh] items-center justify-center text-emerald-900/70">
@@ -173,6 +189,17 @@ export default function AdminPage() {
           <p className="mt-1 text-sm text-emerald-900/55">Пользователи, роли и доступ</p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {user.protected_account ? (
+            <button
+              type="button"
+              disabled={clearingCache}
+              onClick={() => void clearRegistryCacheNow()}
+              className="rounded-xl border border-amber-200/90 bg-white px-4 py-2 text-sm font-medium text-amber-800 transition hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60"
+              title="Очистить локальный кэш реестра на сервере"
+            >
+              {clearingCache ? "Очистка кэша…" : "Очистить кэш реестра"}
+            </button>
+          ) : null}
           <Link
             href="/app"
             className="rounded-xl border border-emerald-200/90 bg-white px-4 py-2 text-sm font-medium text-emerald-900 shadow-sm transition hover:bg-emerald-50/90"

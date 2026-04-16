@@ -2,36 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable
 
 import pdfplumber
-from app.services.registry_record_parser import repair_registry_address
+from sqlalchemy import delete, func, select
 
-_DATA = Path(__file__).resolve().parent.parent / "data"
-USER_CACHE_PATH = _DATA / "user_registry_cache.json"
-GEOCODE_CACHE_PATH = _DATA / "geocode_cache.json"
+from app.db.models import GeocodeCacheModel, RegistryCacheMetaModel, RegistryRecordModel
+from app.db.session import session_scope
+from app.services.registry_record_parser import repair_registry_address
 
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_json(path: Path) -> Any:
-    if not path.is_file():
-        return None
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
-
 def registry_files_fingerprint(files: list[tuple[str, bytes]]) -> str:
-    """
-    Отпечаток набора PDF по содержимому (SHA-256 каждого файла, без учёта имён и порядка выбора).
-    Один и тот же набор байтов даёт тот же отпечаток.
-    """
     digests = sorted(hashlib.sha256(data).hexdigest() for _, data in files)
     return hashlib.sha256("\n".join(digests).encode("utf-8")).hexdigest()
 
@@ -41,48 +28,59 @@ def save_user_registry_cache(
     records: list[dict[str, Any]],
     source_signature: str,
 ) -> None:
-    USER_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    records = dedupe_registry_records_by_id(records)
-    payload = {
-        "version": 2,
-        "updated_at": _utc_iso(),
-        "sources": sources,
-        "source_signature": source_signature,
-        "records": records,
-    }
-    tmp = USER_CACHE_PATH.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    tmp.replace(USER_CACHE_PATH)
+    with session_scope() as session:
+        session.execute(delete(RegistryRecordModel))
+        session.execute(delete(RegistryCacheMetaModel))
+        meta = RegistryCacheMetaModel(
+            id=1,
+            version=2,
+            updated_at=_utc_iso(),
+            source_signature=source_signature,
+            sources=sources,
+        )
+        session.add(meta)
+        for row in records:
+            if not isinstance(row, dict):
+                continue
+            rec = RegistryRecordModel(
+                source_part=_safe_int(row.get("source_part")),
+                record_id=_safe_int(row.get("id")),
+                owner=str(row.get("owner") or ""),
+                object_name=str(row.get("object_name") or ""),
+                waste_code=str(row.get("waste_code")) if row.get("waste_code") is not None else None,
+                waste_type_name=str(row.get("waste_type_name")) if row.get("waste_type_name") is not None else None,
+                accepts_external_waste=bool(row.get("accepts_external_waste", True)),
+                address=str(row.get("address")) if row.get("address") is not None else None,
+                phones=str(row.get("phones")) if row.get("phones") is not None else None,
+                lat=_safe_float(row.get("lat")),
+                lon=_safe_float(row.get("lon")),
+                payload=row,
+            )
+            session.add(rec)
 
 
-def dedupe_registry_records_by_id(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Первая запись на каждый id (дубликаты строк в PDF / при импорте)."""
-    seen: set[int] = set()
-    out: list[dict[str, Any]] = []
-    for row in records:
-        if not isinstance(row, dict):
-            continue
-        try:
-            rid = int(row["id"])
-        except (KeyError, TypeError, ValueError):
-            out.append(row)
-            continue
-        if rid in seen:
-            continue
-        seen.add(rid)
-        out.append(row)
-    return out
+def _safe_int(v: object) -> int | None:
+    try:
+        if v is None:
+            return None
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_float(v: object) -> float | None:
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 _POSTAL_CITY_RE = re.compile(r"\b(\d{6})\b[\s,;:\-–—]{0,40}\bг\.\s*([А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2})")
 
 
 def _build_postal_city_map(rows: list[dict[str, Any]]) -> dict[str, str]:
-    """
-    Извлекает вероятный город по индексу на основе всех текстов карточек.
-    Если по индексу встречается несколько городов с сопоставимой частотой, индекс пропускаем.
-    """
     stats: dict[str, dict[str, int]] = {}
     for row in rows:
         if not isinstance(row, dict):
@@ -109,7 +107,6 @@ def _build_postal_city_map(rows: list[dict[str, Any]]) -> dict[str, str]:
         ranked = sorted(by_city.items(), key=lambda x: x[1], reverse=True)
         best_city, best_count = ranked[0]
         second_count = ranked[1][1] if len(ranked) > 1 else 0
-        # Берём город только если он уверенно доминирует по этому индексу.
         if best_count >= 2 and best_count >= second_count + 2:
             out[postal] = best_city
     return out
@@ -132,13 +129,30 @@ def _repair_truncated_city_suffix(address: str, postal_to_city: dict[str, str]) 
     return f"{base}, г. {city}"
 
 
+def _db_row_to_payload(row: RegistryRecordModel) -> dict[str, Any]:
+    if isinstance(row.payload, dict):
+        return dict(row.payload)
+    out: dict[str, Any] = {
+        "id": row.record_id,
+        "owner": row.owner,
+        "object_name": row.object_name,
+        "waste_code": row.waste_code,
+        "waste_type_name": row.waste_type_name,
+        "accepts_external_waste": row.accepts_external_waste,
+        "address": row.address,
+        "phones": row.phones,
+        "source_part": row.source_part,
+        "lat": row.lat,
+        "lon": row.lon,
+    }
+    return out
+
+
 def load_cached_registry_records() -> list[dict[str, Any]]:
-    data = _load_json(USER_CACHE_PATH)
-    if not data or not isinstance(data.get("records"), list):
-        return []
-    rows = dedupe_registry_records_by_id(list(data["records"]))
+    with session_scope() as session:
+        db_rows = session.execute(select(RegistryRecordModel).order_by(RegistryRecordModel.pk.asc())).scalars().all()
+    rows = [_db_row_to_payload(row) for row in db_rows]
     postal_to_city = _build_postal_city_map(rows)
-    # Мягкая починка старого кэша: исправляем явно битые адресные хвосты.
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -153,37 +167,50 @@ def load_cached_registry_records() -> list[dict[str, Any]]:
 
 
 def cache_meta() -> dict[str, Any] | None:
-    data = _load_json(USER_CACHE_PATH)
-    if not data:
-        return None
-    raw = data.get("records") or []
-    recs = dedupe_registry_records_by_id(list(raw)) if isinstance(raw, list) else []
-    return {
-        "updated_at": data.get("updated_at"),
-        "record_count": len(recs),
-        "sources": data.get("sources") or [],
-        "source_signature": data.get("source_signature"),
-    }
+    with session_scope() as session:
+        meta = session.get(RegistryCacheMetaModel, 1)
+        if not meta:
+            return None
+        records_count = session.execute(select(func.count(RegistryRecordModel.pk))).scalar_one()
+        return {
+            "updated_at": meta.updated_at,
+            "record_count": int(records_count),
+            "sources": meta.sources or [],
+            "source_signature": meta.source_signature,
+        }
 
 
 def cached_registry_signature() -> str | None:
-    data = _load_json(USER_CACHE_PATH)
-    if not data:
-        return None
-    sig = data.get("source_signature")
-    return str(sig) if sig else None
+    with session_scope() as session:
+        meta = session.get(RegistryCacheMetaModel, 1)
+        if not meta:
+            return None
+        sig = meta.source_signature
+        return str(sig) if sig else None
 
 
 def load_geocode_cache() -> dict[str, dict[str, float]]:
-    return _load_json(GEOCODE_CACHE_PATH) or {}
+    with session_scope() as session:
+        rows = session.execute(select(GeocodeCacheModel)).scalars().all()
+        return {r.key: {"lat": float(r.lat), "lon": float(r.lon)} for r in rows}
 
 
 def save_geocode_cache(cache: dict[str, dict[str, float]]) -> None:
-    GEOCODE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = GEOCODE_CACHE_PATH.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
-    tmp.replace(GEOCODE_CACHE_PATH)
+    with session_scope() as session:
+        for key, pair in cache.items():
+            if not isinstance(pair, dict):
+                continue
+            lat = _safe_float(pair.get("lat"))
+            lon = _safe_float(pair.get("lon"))
+            if lat is None or lon is None:
+                continue
+            row = session.get(GeocodeCacheModel, key)
+            if row:
+                row.lat = lat
+                row.lon = lon
+                session.add(row)
+                continue
+            session.add(GeocodeCacheModel(key=key, lat=lat, lon=lon))
 
 
 def extract_pdf_text_from_bytes(
@@ -204,5 +231,6 @@ def extract_pdf_text_from_bytes(
 
 
 def clear_user_registry_cache() -> None:
-    if USER_CACHE_PATH.is_file():
-        USER_CACHE_PATH.unlink()
+    with session_scope() as session:
+        session.execute(delete(RegistryRecordModel))
+        session.execute(delete(RegistryCacheMetaModel))

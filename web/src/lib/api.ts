@@ -117,6 +117,23 @@ export async function fetchRegistryCacheMeta(): Promise<RegistryCacheMeta | null
   return res.ok ? res.cache : null;
 }
 
+export async function clearRegistryCache(): Promise<void> {
+  const r = await fetch(`${base()}/api/v1/registry/cache`, {
+    ...cred,
+    method: "DELETE",
+  });
+  if (!r.ok) {
+    let msg = `clear cache: ${r.status}`;
+    try {
+      const j = (await r.json()) as { detail?: string };
+      if (typeof j.detail === "string") msg = j.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+}
+
 export type RegistryImportStatus = {
   status: string;
   progress: number;

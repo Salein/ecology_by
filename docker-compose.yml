@@ -14,9 +14,21 @@
 # Пересоберите web: docker compose build --no-cache web
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ecology}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - ecology_postgres_data:/var/lib/postgresql/data
+
   api:
     build: ./server
     restart: unless-stopped
+    depends_on:
+      - postgres
     environment:
       CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:8080}
       JWT_SECRET: ${JWT_SECRET:-docker-dev-change-jwt-secret}
@@ -24,6 +36,7 @@ services:
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-0}
       BOOTSTRAP_OWNER_EMAIL: ${BOOTSTRAP_OWNER_EMAIL:-}
       BOOTSTRAP_OWNER_PASSWORD: ${BOOTSTRAP_OWNER_PASSWORD:-}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-ecology}
     volumes:
       - ecology_api_data:/app/app/data
 
@@ -49,3 +62,4 @@ services:
 
 volumes:
   ecology_api_data:
+  ecology_postgres_data:

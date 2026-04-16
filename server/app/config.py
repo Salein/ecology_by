@@ -73,6 +73,13 @@ class Settings:
         os.getenv("BOOTSTRAP_OWNER_EMAIL") or "eug.kulish@gmail.com"
     ).strip().lower()
     bootstrap_owner_password: str = (os.getenv("BOOTSTRAP_OWNER_PASSWORD") or "Bagamol42").strip()
+    database_url: str = (
+        os.getenv("DATABASE_URL")
+        or "postgresql+psycopg://postgres:postgres@localhost:5432/ecology"
+    ).strip()
+    database_echo: bool = os.getenv("DATABASE_ECHO", "").lower() in ("1", "true", "yes")
+    database_pool_size: int = _int_env("DATABASE_POOL_SIZE", 10)
+    database_max_overflow: int = _int_env("DATABASE_MAX_OVERFLOW", 20)
 
 
 settings = Settings()

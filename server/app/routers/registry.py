@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 
 from app.deps import get_current_user, require_admin
-from app.services.auth_users import UserRecord
+from app.services.auth_users import UserRecord, is_bootstrap_owner_user
 from app.services.registry_import_jobs import create_job, get_job, run_registry_import_job
 from app.services.user_registry_cache import (
     cache_meta,
@@ -24,7 +24,9 @@ async def registry_cache_info(_: UserRecord = Depends(get_current_user)):
 
 
 @router.delete("/cache")
-async def registry_cache_delete():
+async def registry_cache_delete(admin: UserRecord = Depends(require_admin)):
+    if not is_bootstrap_owner_user(admin):
+        raise HTTPException(status_code=403, detail="Очистка кэша доступна только владельцу системы")
     clear_user_registry_cache()
     return {"ok": True, "message": "Кэш реестра очищен."}
 

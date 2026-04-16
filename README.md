@@ -1,11 +1,12 @@
 # Ecology — поиск объектов обращения с отходами
 
-Монорепозиторий: **фронтенд** на Next.js и **бэкенд** на Python (FastAPI): загрузка PDF реестров с сайта [ecoinfo.by](https://www.ecoinfo.by/) (вручную), парсинг, кэш на диске, поиск и семь ближайших объектов, карта OpenStreetMap (Leaflet), геокодинг Nominatim.
+Монорепозиторий: **фронтенд** на Next.js и **бэкенд** на Python (FastAPI): загрузка PDF реестров с сайта [ecoinfo.by](https://www.ecoinfo.by/) (вручную), парсинг, кэш в PostgreSQL, поиск и семь ближайших объектов, карта OpenStreetMap (Leaflet), геокодинг Nominatim.
 
 ## Требования
 
 - **Node.js** 20+ (для `web/`)
 - **Python** 3.11+ (для `server/`)
+- **PostgreSQL** 16+ (локально или в Docker)
 - Интернет (тайлы карты, Nominatim при первичной загрузке реестра)
 
 ## Структура каталогов
@@ -40,9 +41,32 @@ python -m pip install -U pip
 python -m pip install -r requirements.txt
 ```
 
-2. (Необязательно) скопируйте `server/.env.example` в `server/.env`.
+2. (Необязательно) скопируйте `server/.env.example` в `server/.env` и укажите `DATABASE_URL`.
 
-3. Запустите API из каталога `server`:
+3. Примените миграции (из каталога `server`, с активированным venv):
+
+```bash
+cd server
+python -m alembic upgrade head
+```
+
+В **PowerShell** не используйте `cd server && …` в старых версиях — выполните команды по очереди или через `;` (`cd server; python -m alembic upgrade head`). Команда `python -m alembic` нужна, если скрипт `alembic` не в `PATH`.
+
+4. (Опционально) перенесите текущих пользователей из JSON:
+
+```bash
+cd server
+python -m app.jobs.import_auth_users
+```
+
+Для переноса уже сохранённого кэша реестра и геокэша из JSON в PostgreSQL:
+
+```bash
+cd server
+python -m app.jobs.import_registry_cache
+```
+
+5. Запустите API из каталога `server`:
 
 ```bash
 cd server
@@ -72,7 +96,7 @@ npm run dev
 
 1. Скачайте с [страницы реестров ecoinfo.by](https://www.ecoinfo.by/%D0%B0%D0%B4%D0%BC%D0%B8%D0%BD%D0%B8%D1%81%D1%82%D1%80%D0%B0%D1%82%D0%B8%D0%B2%D0%BD%D1%8B%D0%B5-%D0%BF%D1%80%D0%BE%D1%86%D0%B5%D0%B4%D1%83%D1%80%D1%8B/%D1%80%D0%B5%D0%B5%D1%81%D1%82%D1%80%D1%8B) файлы «Реестр объектов по использованию отходов (часть I)» и при необходимости «(часть II)».
 2. На сайте нажмите **«Загрузить реестр»** и выберите один или несколько PDF.
-3. Сервер парсит документы, геокодирует адреса (с паузой между запросами к Nominatim), сохраняет структурированные данные в **`server/app/data/user_registry_cache.json`**, координаты адресов — в **`geocode_cache.json`**.
+3. Сервер парсит документы, геокодирует адреса (с паузой между запросами к Nominatim), сохраняет структурированные данные в таблицу `registry_records`, координаты адресов — в `geocode_cache`.
 4. Повторная загрузка не обязательна: поиск идёт из кэша, пока вы не очистите его (`DELETE /api/v1/registry/cache`) или не загрузите реестр снова (кэш перезапишется).
 
 Большие PDF обрабатываются долго (тысячи записей и геокодирование) — на интерфейсе отображаются прогресс и skeleton списка.
