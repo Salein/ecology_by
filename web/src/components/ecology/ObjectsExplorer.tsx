@@ -25,13 +25,18 @@ const EM_DASH = "—";
 
 const LOCATION_PLACEHOLDER = "Выберите местоположение объекта";
 
-/** Сетка строки результатов: код | собственник | объект | адрес | телефоны | расстояние */
+/** Сетка строки результатов: код | собственник | объект | адрес | телефоны | по воздуху | по дорогам */
 const RESULT_GRID =
-  "sm:grid-cols-[minmax(0,4.5rem)_minmax(0,1fr)_minmax(0,1.05fr)_minmax(0,1.35fr)_minmax(0,1.05fr)_minmax(0,4.75rem)]";
+  "sm:grid-cols-[minmax(5rem,5.5rem)_minmax(14.2rem,1.15fr)_minmax(14.2rem,1.15fr)_minmax(16.2rem,1.4fr)_minmax(10.1rem,0.95fr)_minmax(7.4rem,0.8fr)_minmax(7.4rem,0.8fr)]";
 
 function formatDistance(km: number | null | undefined): string {
   if (km == null || Number.isNaN(km)) return EM_DASH;
   return `~${Math.round(km)} км`;
+}
+
+function formatSpread(km: number | null | undefined): string {
+  if (km == null || Number.isNaN(km)) return "";
+  return `±${Math.round(km)} км`;
 }
 
 function distanceIsMissing(km: number | null | undefined): boolean {
@@ -40,6 +45,7 @@ function distanceIsMissing(km: number | null | undefined): boolean {
 
 /** Под строкой с «—», если точка на карте выбрана, а км не посчитались */
 const DISTANCE_NOT_CALCULATED_NOTE = "Расстояние не удалось рассчитать";
+const ROAD_DISTANCE_NOT_CALCULATED_NOTE = "По дорогам: расчёт не выполнен";
 
 /** Перенос строки после почтового индекса (6 цифр в начале), типично для адресов РБ. */
 function extractAddressHintFromText(text: string): string | null {
@@ -216,7 +222,7 @@ function ResultsSkeleton() {
       {Array.from({ length: 7 }).map((_, i) => (
         <li
           key={i}
-          className={`grid animate-pulse grid-cols-1 gap-3 rounded-2xl border border-emerald-100/90 bg-white/90 p-4 shadow-sm shadow-emerald-900/5 ${RESULT_GRID} sm:items-start sm:gap-4`}
+          className={`grid animate-pulse grid-cols-1 gap-3 rounded-2xl border border-emerald-100/90 bg-white/90 p-4 shadow-sm shadow-emerald-900/5 ${RESULT_GRID} sm:items-start sm:gap-x-5 sm:gap-y-3`}
         >
           <div className="h-5 w-10 rounded bg-emerald-100 sm:pt-0.5" />
           <div className="h-4 w-full max-w-full rounded bg-emerald-100 sm:pt-0.5" />
@@ -224,9 +230,109 @@ function ResultsSkeleton() {
           <div className="h-14 w-full rounded-lg bg-emerald-100" />
           <div className="h-10 w-full rounded-lg bg-emerald-100" />
           <div className="h-10 w-14 justify-self-end rounded-xl bg-emerald-100 sm:justify-self-end sm:pt-0.5" />
+          <div className="h-10 w-20 justify-self-end rounded-xl bg-emerald-100 sm:justify-self-end sm:pt-0.5" />
         </li>
       ))}
     </ul>
+  );
+}
+
+function DistanceCalculationLoader() {
+  const leaves = [
+    { left: "17%", top: "18%", delay: "0ms" },
+    { left: "26%", top: "12%", delay: "160ms" },
+    { left: "35%", top: "10%", delay: "320ms" },
+    { left: "45%", top: "11%", delay: "520ms" },
+    { left: "56%", top: "13%", delay: "700ms" },
+    { left: "67%", top: "17%", delay: "860ms" },
+    { left: "74%", top: "24%", delay: "1020ms" },
+    { left: "63%", top: "26%", delay: "1180ms" },
+    { left: "51%", top: "25%", delay: "1320ms" },
+    { left: "39%", top: "24%", delay: "1460ms" },
+    { left: "29%", top: "23%", delay: "1600ms" },
+    { left: "21%", top: "25%", delay: "1740ms" },
+  ];
+
+  return (
+    <div
+      className="relative overflow-hidden rounded-2xl border border-emerald-200/80 bg-gradient-to-br from-emerald-50 via-lime-50 to-amber-50 shadow-sm shadow-emerald-900/5"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <div className="relative min-h-[48vh] w-full sm:min-h-[50vh]">
+        <div className="eco-loader-image absolute inset-0 bg-[url('/loader/eco-loader.png')] bg-contain bg-center bg-no-repeat" />
+        <div className="eco-loader-light absolute inset-0 bg-gradient-to-r from-emerald-300/10 via-amber-100/35 to-lime-200/20" />
+        <div className="absolute inset-0 bg-gradient-to-t from-emerald-950/45 via-emerald-900/20 to-transparent" />
+        <div className="pointer-events-none absolute inset-0">
+          {leaves.map((leaf, i) => (
+            <span
+              key={i}
+              className="eco-loader-leaf absolute h-2.5 w-2.5 rounded-full bg-lime-200/90 shadow-[0_0_0_1px_rgba(16,185,129,0.3)]"
+              style={{ left: leaf.left, top: leaf.top, animationDelay: leaf.delay }}
+            />
+          ))}
+        </div>
+        <div className="absolute inset-x-0 bottom-0 p-4 sm:p-5">
+          <div className="inline-flex max-w-full flex-col rounded-xl border border-emerald-100/60 bg-emerald-950/35 px-3 py-2 backdrop-blur-[1px]">
+            <p className="text-sm font-semibold text-emerald-50">Идёт расчёт расстояний…</p>
+            <p className="mt-0.5 text-xs leading-relaxed text-emerald-100/90">
+              Подбираем ближайшие объекты и считаем расстояние по воздуху и по дорогам.
+            </p>
+          </div>
+        </div>
+      </div>
+      <style jsx>{`
+        .eco-loader-image {
+          animation: ecoZoomPan 7s ease-in-out infinite;
+          transform-origin: center 40%;
+        }
+        .eco-loader-light {
+          animation: lightPulse 3.4s ease-in-out infinite;
+        }
+        .eco-loader-leaf {
+          opacity: 0.15;
+          transform: scale(0.4);
+          animation: leafBloom 2.2s ease-in-out infinite;
+        }
+        @keyframes leafBloom {
+          0% {
+            opacity: 0.12;
+            transform: scale(0.35);
+          }
+          35% {
+            opacity: 0.95;
+            transform: scale(1);
+          }
+          70% {
+            opacity: 1;
+            transform: scale(1.1);
+          }
+          100% {
+            opacity: 0.2;
+            transform: scale(0.45);
+          }
+        }
+        @keyframes lightPulse {
+          0%,
+          100% {
+            opacity: 0.45;
+          }
+          50% {
+            opacity: 0.82;
+          }
+        }
+        @keyframes ecoZoomPan {
+          0%,
+          100% {
+            transform: scale(1) translate3d(0, 0, 0);
+          }
+          50% {
+            transform: scale(1.045) translate3d(0, -1.5%, 0);
+          }
+        }
+      `}</style>
+    </div>
   );
 }
 
@@ -389,7 +495,22 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
           await runSearch();
         }
       } catch (e) {
-        setImportError(e instanceof Error ? e.message : "Ошибка загрузки");
+        let msg =
+          e instanceof Error && e.message
+            ? e.message
+            : "Ошибка загрузки";
+        const uploadingMultiple = files.length > 1;
+        if (
+          uploadingMultiple &&
+          /ошибка загрузки|import status failed|network|сеть|fetch|500|502|503|504/i.test(
+            msg,
+          )
+        ) {
+          msg =
+            "Сервис обработки реестра не смог корректно завершить совместную обработку двух PDF. " +
+            "Попробуйте загрузить файлы по одному и проверьте, что API и фоновые воркеры запущены (см. логи docker compose).";
+        }
+        setImportError(msg);
       } finally {
         setImportBusy(false);
         setImportProgress(0);
@@ -408,15 +529,6 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
     ? addressLabel.trim() || `${lat!.toFixed(4)}, ${lon!.toFixed(4)}`
     : LOCATION_PLACEHOLDER;
 
-  const distancesMissingForAllRows = useMemo(
-    () =>
-      lat != null &&
-      lon != null &&
-      rows.length > 0 &&
-      rows.every((r) => distanceIsMissing(r.distance_km)),
-    [lat, lon, rows],
-  );
-
   const registryLoaded = Boolean(cacheMeta && cacheMeta.record_count > 0);
   const registryUploadedAt = useMemo(() => {
     if (!cacheMeta?.updated_at) return null;
@@ -434,7 +546,7 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
   }, [cacheMeta?.updated_at]);
 
   return (
-    <div className="relative z-10 mx-auto flex w-full max-w-7xl flex-col gap-8 px-4 py-10 sm:px-6">
+    <div className="relative z-10 mx-auto flex w-full max-w-[min(100%,96rem)] flex-col gap-8 px-4 py-10 sm:px-6">
       <div className="flex flex-wrap items-center justify-end gap-2 text-sm">
         <span className="mr-auto text-emerald-900/70">
           {user?.name ? (
@@ -475,8 +587,9 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
             {canImportRegistry
               ? "Загрузите PDF реестров (часть I и II) — данные кэшируются на сервере. "
               : "Данные реестра на сервере. "}
-            В списке — семь ближайших объектов к выбранной точке. Расстояние — ориентировочное: считается по адресу
-            объекта (геокодирование, затем Haversine). Карта — OpenStreetMap.
+            В списке — семь ближайших объектов к выбранной точке. Показываем два расчёта: по воздуху (Haversine) и по
+            дорогам (OSRM, с fallback при недоступности роутинга). Обе дистанции оценочные; рядом выводится примерный
+            разброс (± км). Карта — OpenStreetMap.
           </p>
           <div className="flex flex-col gap-1 border-l-2 border-emerald-200/80 py-0.5 pl-3 text-xs sm:text-[13px]">
             <p className="text-emerald-900/80">
@@ -508,8 +621,9 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
             {registryMetaError && cacheMetaReady ? (
               <p className="text-xs text-red-800/90">
                 Не удалось запросить <code className="rounded bg-red-100/80 px-1">/api/v1/registry/cache</code>:{" "}
-                {registryMetaError}. Запустите Python API, проверьте{" "}
-                <code className="rounded bg-red-100/80 px-1">NEXT_PUBLIC_API_URL</code> и CORS.
+                {registryMetaError}. Запустите API и edge (nginx), проверьте{" "}
+                <code className="rounded bg-red-100/80 px-1">NEXT_PUBLIC_API_URL</code> (в Docker — относительные{" "}
+                <code className="rounded bg-red-100/80 px-1">/api/...</code>).
               </p>
             ) : null}
             {registryLoaded && cacheMeta ? (
@@ -608,7 +722,10 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
           </div>
           {error ? (
             <p className="text-sm text-red-600">
-              {error}. Убедитесь, что Python API запущен (порт 8000).
+              {error}
+              {typeof error === "string" && error.includes("docker compose") ? null : (
+                <> Локальная разработка: API на порту 8000; Docker: проверьте контейнеры и nginx.</>
+              )}
             </p>
           ) : null}
         </div>
@@ -666,30 +783,8 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
       </section>
 
       <section className="space-y-3">
-        {showDistanceSearchLoader ? (
-          <div
-            className="flex flex-col gap-3 rounded-2xl border border-emerald-200/80 bg-emerald-50/90 px-4 py-4 shadow-sm shadow-emerald-900/5"
-            role="status"
-            aria-live="polite"
-            aria-busy="true"
-          >
-            <div className="flex items-center gap-3">
-              <span
-                className="size-5 shrink-0 animate-spin rounded-full border-2 border-emerald-200 border-t-emerald-600"
-                aria-hidden
-              />
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-emerald-950">Идёт расчёт расстояний…</p>
-                <p className="mt-0.5 text-xs text-emerald-800/60">
-                  Геокодирование адресов объектов и подбор ближайших к вашей точке. Первый запрос может занять до минуты
-                  из‑за лимитов Nominatim.
-                </p>
-              </div>
-            </div>
-          </div>
-        ) : null}
         <div
-          className={`hidden gap-4 px-4 text-xs font-semibold uppercase tracking-wide text-emerald-800/70 sm:grid ${RESULT_GRID}`}
+          className={`hidden gap-3 px-3 text-xs font-semibold uppercase tracking-wide text-emerald-800/70 sm:grid sm:gap-x-5 sm:gap-y-2 ${RESULT_GRID}`}
         >
           <span>Код объекта</span>
           <span>Собственник</span>
@@ -698,9 +793,15 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
           <span>Телефоны</span>
           <span
             className="text-right normal-case sm:text-right"
-            title="Ориентировочно по геокодированию адреса объекта"
+            title="Расстояние по прямой (Haversine)"
           >
-            Примерное Расстояние км
+            По воздуху, км
+          </span>
+          <span
+            className="text-right normal-case sm:text-right"
+            title="Расстояние по дорогам (OSRM)"
+          >
+            По дорогам, км
           </span>
         </div>
 
@@ -711,14 +812,14 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
             {rows.map((row, idx) => (
               <li
                 key={`${row.waste_code ?? "x"}-${row.id}-${idx}`}
-                className={`grid grid-cols-1 gap-3 rounded-2xl border border-emerald-100/90 bg-white/95 p-4 shadow-sm shadow-emerald-900/5 ${RESULT_GRID} sm:items-start sm:gap-4`}
+                className={`grid grid-cols-1 gap-3 rounded-2xl border border-emerald-100/90 bg-white/95 p-3 shadow-sm shadow-emerald-900/5 ${RESULT_GRID} sm:items-start sm:gap-x-5 sm:gap-y-3`}
               >
                 <div className="text-sm font-semibold text-emerald-900/90 sm:pt-0.5 sm:text-base">{row.id}</div>
-                <div className="min-w-0 text-base leading-snug text-stone-800 sm:pt-0.5">
+                <div className="min-w-0 break-words text-base leading-snug text-stone-800 sm:pt-0.5">
                   {formatOwnerDisplay(row.owner)}
                 </div>
-                <div className="flex min-w-0 flex-col gap-2 rounded-xl border border-emerald-100/70 bg-emerald-50/70 px-3 py-2.5 text-base leading-snug text-stone-800">
-                  <span>{row.object_name}</span>
+                <div className="flex min-w-0 flex-col gap-2 rounded-xl border border-emerald-100/70 bg-emerald-50/70 px-4 py-3 text-base leading-snug text-stone-800 break-words">
+                  <span className="min-w-0">{row.object_name}</span>
                   {row.accepts_external_waste !== false ? (
                     <span className="inline-flex w-fit max-w-full rounded-lg border border-emerald-200/80 bg-white/80 px-2 py-1 text-sm font-medium leading-tight text-emerald-950">
                       Принимает отходы от других лиц
@@ -729,7 +830,7 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
                   <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-emerald-800/40 sm:sr-only">
                     Адрес объекта
                   </span>
-                  <div className="rounded-xl border border-emerald-100/70 bg-emerald-50/40 px-3 py-2 text-base leading-relaxed text-stone-800">
+                  <div className="min-w-0 break-words rounded-xl border border-emerald-100/70 bg-emerald-50/40 px-4 py-3 text-base leading-relaxed text-stone-800">
                     {formatAddressDisplay(row.address, row.owner, row.object_name)}
                   </div>
                 </div>
@@ -737,30 +838,60 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
                   <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-emerald-800/40 sm:sr-only">
                     Телефоны
                   </span>
-                  <div className="rounded-xl border border-emerald-100/70 bg-emerald-50/40 px-3 py-2 text-sm leading-relaxed text-stone-800 break-words tabular-nums">
+                  <div className="rounded-xl border border-emerald-100/70 bg-emerald-50/40 px-4 py-3 text-sm leading-relaxed text-stone-800 break-words tabular-nums">
                     {formatPhonesDisplay(row.phones)}
                   </div>
                 </div>
-                <div className="flex flex-col items-end gap-1 sm:justify-end sm:pt-0.5">
+                <div className="flex min-w-0 w-full flex-col items-stretch gap-1.5 sm:items-end sm:justify-end sm:pt-0.5">
                   <span
-                    className="inline-flex rounded-xl border border-emerald-200/60 bg-emerald-100/95 px-3 py-2 text-sm font-medium text-emerald-900"
+                    className="inline-flex w-full justify-center rounded-xl border border-emerald-200/60 bg-emerald-100/95 px-3 py-2.5 text-sm font-medium text-emerald-900"
                     title={
-                      locationChosen && distanceIsMissing(row.distance_km)
+                      locationChosen && distanceIsMissing(row.distance_air_km)
                         ? DISTANCE_NOT_CALCULATED_NOTE
                         : undefined
                     }
                   >
-                    {formatDistance(row.distance_km)}
+                    {formatDistance(row.distance_air_km)}
                   </span>
+                  {row.distance_is_approx && row.distance_spread_km != null ? (
+                    <span
+                      className="w-full text-right text-[13px] leading-snug text-emerald-900/85 sm:max-w-[14.5rem]"
+                      title={row.distance_spread_note || "Ориентировочный разброс"}
+                    >
+                      {`примерно ${formatSpread(row.distance_spread_km)}`}
+                    </span>
+                  ) : null}
                   {row.distance_note?.trim() ? (
-                    <span className="max-w-[14rem] text-right text-[13px] leading-snug text-black sm:max-w-[10rem]">
+                    <span className="w-full text-right text-[13px] leading-snug text-stone-800 sm:max-w-[14.5rem]">
                       {row.distance_note.trim()}
                     </span>
-                  ) : locationChosen &&
-                    distanceIsMissing(row.distance_km) &&
-                    !distancesMissingForAllRows ? (
-                    <span className="max-w-[14rem] text-right text-[13px] leading-snug text-amber-900/70 sm:max-w-[10rem]">
+                  ) : locationChosen && distanceIsMissing(row.distance_air_km) ? (
+                    <span className="w-full text-right text-[13px] leading-snug text-amber-900/70 sm:max-w-[14.5rem]">
                       {DISTANCE_NOT_CALCULATED_NOTE}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex min-w-0 w-full flex-col items-stretch gap-1.5 sm:items-end sm:justify-end sm:pt-0.5">
+                  <span
+                    className="inline-flex w-full justify-center rounded-xl border border-emerald-200/60 bg-emerald-100/95 px-3 py-2.5 text-sm font-medium text-emerald-900"
+                    title={
+                      locationChosen && distanceIsMissing(row.distance_road_km)
+                        ? row.distance_road_error?.trim() || ROAD_DISTANCE_NOT_CALCULATED_NOTE
+                        : undefined
+                    }
+                  >
+                    {formatDistance(row.distance_road_km)}
+                  </span>
+                  {locationChosen && distanceIsMissing(row.distance_road_km) ? (
+                    <span className="w-full text-right text-[13px] leading-snug text-amber-900/80 sm:max-w-[14.5rem]">
+                      {row.distance_road_error?.trim() || ROAD_DISTANCE_NOT_CALCULATED_NOTE}
+                    </span>
+                  ) : row.distance_is_approx && row.distance_spread_km != null ? (
+                    <span
+                      className="w-full text-right text-[13px] leading-snug text-emerald-900/85 sm:max-w-[14.5rem]"
+                      title={row.distance_spread_note || "Ориентировочный разброс"}
+                    >
+                      {`примерно ${formatSpread(row.distance_spread_km)}`}
                     </span>
                   ) : null}
                 </div>
@@ -787,6 +918,13 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
           setMapOpen(false);
         }}
       />
+      {showDistanceSearchLoader ? (
+        <div className="fixed inset-0 z-[120] flex items-start justify-center bg-emerald-950/35 px-4 py-6 backdrop-blur-[1.5px]">
+          <div className="w-full max-w-[min(100%,96rem)]">
+            <DistanceCalculationLoader />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -45,6 +45,98 @@ def _extract_address_hint(s: str) -> str | None:
     return hint or None
 
 
+_LOCALITY_RE = re.compile(
+    r"\b(г\.\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|г/п\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|аг\.\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|д\.\s*[А-ЯЁA-ZА-ЯЁа-яё0-9][А-ЯЁA-Za-zа-яё0-9\-]+(?:\s+[А-ЯЁA-ZА-ЯЁа-яё0-9][А-ЯЁA-Za-zа-яё0-9\-]+){0,2}"
+    r"|дер\.\s*[А-ЯЁA-ZА-ЯЁа-яё0-9][А-ЯЁA-Za-zа-яё0-9\-]+(?:\s+[А-ЯЁA-ZА-ЯЁа-яё0-9][А-ЯЁA-Za-zа-яё0-9\-]+){0,2}"
+    r"|п\.\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|пос\.\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|пос[её]лок\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|городок\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2})\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _dedupe_locality_in_address(address: str) -> str:
+    """
+    Убирает повтор одного и того же населённого пункта в адресе.
+    Частый артефакт: "..., г. Гомель, ..., г. Гомель".
+    """
+    compact = re.sub(r"\s+", " ", (address or "").replace("\xa0", " ")).strip()
+    if not compact:
+        return compact
+    matches = list(_LOCALITY_RE.finditer(compact))
+    if len(matches) <= 1:
+        return compact
+
+    first = matches[0].group(1)
+    first_norm = re.sub(r"\s+", " ", first).strip().casefold()
+    if not first_norm:
+        return compact
+
+    # Удаляем повторные вхождения того же locality (по нормализованному виду).
+    out_parts: list[str] = []
+    last = 0
+    kept_first = False
+    for m in matches:
+        loc = m.group(1)
+        loc_norm = re.sub(r"\s+", " ", loc).strip().casefold()
+        if not kept_first:
+            kept_first = True
+            continue
+        if loc_norm == first_norm:
+            out_parts.append(compact[last : m.start()])
+            last = m.end()
+    out_parts.append(compact[last:])
+    out = "".join(out_parts)
+    out = re.sub(r",\s*,", ",", out)
+    out = re.sub(r"\s+,", ",", out)
+    out = re.sub(r"[,\s]+$", "", out).strip()
+    return out or compact
+
+
+def _ensure_locality_in_address(address: str, *sources: str) -> str:
+    """
+    Гарантируем, что в адресе есть город/НП.
+    В некоторых PDF город уходит в name-часть карточки, а в address остаётся только индекс/область/улица.
+    Здесь вытаскиваем locality из исходных blob'ов и вставляем сразу после индекса.
+    """
+    compact = re.sub(r"\s+", " ", (address or "").replace("\xa0", " ")).strip()
+    if not compact:
+        return compact
+    if _LOCALITY_RE.search(compact):
+        return _dedupe_locality_in_address(compact)
+
+    pool = " ".join((s or "").replace("\xa0", " ") for s in sources if s).strip()
+    pool = re.sub(r"\s+", " ", pool)
+    m = _LOCALITY_RE.search(pool)
+    if not m:
+        return _dedupe_locality_in_address(compact)
+    locality = re.sub(r"[,\s]+$", "", m.group(1)).strip()
+    if len(locality) < 3:
+        return compact
+
+    pm = re.search(r"\b(\d{6})\b", compact)
+    if pm:
+        postal = pm.group(1)
+        injected = re.sub(
+            r"^\s*" + re.escape(postal) + r"\s*,?\s*",
+            f"{postal}, {locality}, ",
+            compact,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        injected = re.sub(r",\s*,", ",", injected)
+        return _dedupe_locality_in_address(re.sub(r"[,\s]+$", "", injected).strip())
+
+    # Без индекса: просто добавим locality в начало.
+    out = f"{locality}, {compact}"
+    out = re.sub(r",\s*,", ",", out)
+    return _dedupe_locality_in_address(re.sub(r"[,\s]+$", "", out).strip())
+
+
 def repair_registry_address(address: str, owner_text: str, object_text: str) -> str:
     """
     Исправляет очевидно битые адреса после OCR/разрезания PDF, например:
@@ -265,7 +357,26 @@ def parse_registry_plain_text(full_text: str, source_part: int) -> list[dict[str
             address = _trim_tail_noise(address)
             if len(address) < 8:
                 address = addr_obj or addr_own or owner_blob
+            # Если город/НП уехал в другие строки карточки — возвращаем его в address.
+            address = _ensure_locality_in_address(address, object_blob, owner_blob)
             address = repair_registry_address(address, owner_blob, object_blob)
+            address = _dedupe_locality_in_address(address)
+
+            # Жёсткий финальный fallback: если населённого пункта нет/не извлекли,
+            # оставляем явный плейсхолдер, чтобы UI не показывал "без города".
+            if not _LOCALITY_RE.search(address):
+                pm = re.search(r"\b(\d{6})\b", address)
+                if pm:
+                    postal = pm.group(1)
+                    address = re.sub(
+                        r"^\s*" + re.escape(postal) + r"\s*,?\s*",
+                        f"{postal}, г. (не указано), ",
+                        address.strip(),
+                        count=1,
+                        flags=re.IGNORECASE,
+                    )
+                    address = re.sub(r",\s*,", ",", address)
+                    address = re.sub(r"[,\s]+$", "", address).strip()
 
             phones = extract_phones_from_text(object_blob, owner_blob)
 

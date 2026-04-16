@@ -77,7 +77,19 @@ def _safe_float(v: object) -> float | None:
         return None
 
 
-_POSTAL_CITY_RE = re.compile(r"\b(\d{6})\b[\s,;:\-–—]{0,40}\bг\.\s*([А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2})")
+_POSTAL_LOCALITY_RE = re.compile(
+    r"\b(\d{6})\b[\s,;:\-–—]{0,40}\b"
+    r"(г\.\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|г/п\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|аг\.\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|д\.\s*[А-ЯЁA-ZА-ЯЁа-яё0-9][А-ЯЁA-Za-zа-яё0-9\-]+(?:\s+[А-ЯЁA-ZА-ЯЁа-яё0-9][А-ЯЁA-Za-zа-яё0-9\-]+){0,2}"
+    r"|дер\.\s*[А-ЯЁA-ZА-ЯЁа-яё0-9][А-ЯЁA-Za-zа-яё0-9\-]+(?:\s+[А-ЯЁA-ZА-ЯЁа-яё0-9][А-ЯЁA-Za-zа-яё0-9\-]+){0,2}"
+    r"|п\.\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|пос\.\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|пос[её]лок\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}"
+    r"|городок\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2})",
+    flags=re.IGNORECASE,
+)
 
 
 def _build_postal_city_map(rows: list[dict[str, Any]]) -> dict[str, str]:
@@ -92,13 +104,13 @@ def _build_postal_city_map(rows: list[dict[str, Any]]) -> dict[str, str]:
         ]
         for text in texts:
             t = text.replace("\xa0", " ")
-            for m in _POSTAL_CITY_RE.finditer(t):
+            for m in _POSTAL_LOCALITY_RE.finditer(t):
                 postal = m.group(1)
-                city = re.sub(r"[,\s]+$", "", m.group(2)).strip()
-                if len(city) < 2:
+                locality = re.sub(r"[,\s]+$", "", m.group(2)).strip()
+                if len(locality) < 3:
                     continue
                 by_city = stats.setdefault(postal, {})
-                by_city[city] = by_city.get(city, 0) + 1
+                by_city[locality] = by_city.get(locality, 0) + 1
 
     out: dict[str, str] = {}
     for postal, by_city in stats.items():
@@ -107,8 +119,12 @@ def _build_postal_city_map(rows: list[dict[str, Any]]) -> dict[str, str]:
         ranked = sorted(by_city.items(), key=lambda x: x[1], reverse=True)
         best_city, best_count = ranked[0]
         second_count = ranked[1][1] if len(ranked) > 1 else 0
-        if best_count >= 2 and best_count >= second_count + 2:
-            out[postal] = best_city
+        # Хотим заполнять город/НП всегда: если для индекса есть хотя бы один вариант,
+        # выбираем самый частый. При равенстве — берём лексикографически первый,
+        # чтобы результат был детерминированным.
+        if best_count >= 1:
+            tied = [x for x in ranked if x[1] == best_count]
+            out[postal] = sorted((x[0] for x in tied), key=lambda s: s.casefold())[0]
     return out
 
 
@@ -116,6 +132,33 @@ def _repair_truncated_city_suffix(address: str, postal_to_city: dict[str, str]) 
     compact = re.sub(r"\s+", " ", (address or "").replace("\xa0", " ")).strip()
     if not compact:
         return compact
+    # Если населённого пункта в адресе нет вовсе, пробуем вставить город по индексу.
+    # Это позволяет стабильно показывать город в UI даже для строк вида "223141," или
+    # "211730, Витебская область,".
+    has_locality = bool(
+        re.search(
+            r"\b(г\.|г/п|город|п\.|пос\.|поселок|посёлок|аг\.|д\.|дер\.|городок)\b",
+            compact,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not has_locality:
+        pm0 = re.search(r"\b(\d{6})\b", compact)
+        if pm0:
+            postal0 = pm0.group(1)
+            loc0 = postal_to_city.get(postal0)
+            if loc0:
+                # Вставляем сразу после индекса.
+                injected = re.sub(
+                    r"^\s*" + re.escape(postal0) + r"\s*,?\s*",
+                    f"{postal0}, {loc0}, ",
+                    compact,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                injected = re.sub(r",\s*,", ",", injected)
+                injected = re.sub(r"[,\s]+$", "", injected).strip()
+                return injected
     if not re.search(r"(?:,\s*|\s+)г\.\s*$", compact, flags=re.IGNORECASE):
         return compact
     pm = re.search(r"\b(\d{6})\b", compact)
@@ -131,20 +174,32 @@ def _repair_truncated_city_suffix(address: str, postal_to_city: dict[str, str]) 
 
 def _db_row_to_payload(row: RegistryRecordModel) -> dict[str, Any]:
     if isinstance(row.payload, dict):
-        return dict(row.payload)
-    out: dict[str, Any] = {
-        "id": row.record_id,
-        "owner": row.owner,
-        "object_name": row.object_name,
-        "waste_code": row.waste_code,
-        "waste_type_name": row.waste_type_name,
-        "accepts_external_waste": row.accepts_external_waste,
-        "address": row.address,
-        "phones": row.phones,
-        "source_part": row.source_part,
-        "lat": row.lat,
-        "lon": row.lon,
-    }
+        out = dict(row.payload)
+    else:
+        out = {
+            "id": row.record_id,
+            "owner": row.owner,
+            "object_name": row.object_name,
+            "waste_code": row.waste_code,
+            "waste_type_name": row.waste_type_name,
+            "accepts_external_waste": row.accepts_external_waste,
+            "address": row.address,
+            "phones": row.phones,
+            "source_part": row.source_part,
+            "lat": row.lat,
+            "lon": row.lon,
+        }
+    # После импорта из JSON в payload иногда бывает id: null — поиск падал с 500 (int(None)).
+    rid = out.get("id")
+    nid: int | None = None
+    if rid is not None and rid != "":
+        try:
+            nid = int(rid)
+        except (TypeError, ValueError):
+            nid = None
+    if nid is None:
+        nid = int(row.record_id) if row.record_id is not None else int(row.pk)
+    out["id"] = nid
     return out
 
 
@@ -232,5 +287,6 @@ def extract_pdf_text_from_bytes(
 
 def clear_user_registry_cache() -> None:
     with session_scope() as session:
+        session.execute(delete(GeocodeCacheModel))
         session.execute(delete(RegistryRecordModel))
         session.execute(delete(RegistryCacheMetaModel))

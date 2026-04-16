@@ -159,7 +159,11 @@ export default function AdminPage() {
   }
 
   async function clearRegistryCacheNow() {
-    if (!window.confirm("Очистить кэш реестра? После этого потребуется повторно загрузить PDF для восстановления данных.")) {
+    if (
+      !window.confirm(
+        "Удалить данные реестра из базы на сервере? Будут удалены все записи реестра и связанные кэши. После этого потребуется повторно загрузить PDF для восстановления данных.",
+      )
+    ) {
       return;
     }
     setErr(null);
@@ -195,9 +199,9 @@ export default function AdminPage() {
               disabled={clearingCache}
               onClick={() => void clearRegistryCacheNow()}
               className="rounded-xl border border-amber-200/90 bg-white px-4 py-2 text-sm font-medium text-amber-800 transition hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60"
-              title="Очистить локальный кэш реестра на сервере"
+              title="Удалить все записи реестра и связанные кэши на сервере"
             >
-              {clearingCache ? "Очистка кэша…" : "Очистить кэш реестра"}
+              {clearingCache ? "Удаление данных…" : "Удалить данные реестра (БД)"}
             </button>
           ) : null}
           <Link

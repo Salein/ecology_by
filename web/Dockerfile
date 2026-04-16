@@ -7,15 +7,15 @@ FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# Тот же origin, с которого пользователь открывает сайт (внешний URL nginx)
-ARG NEXT_PUBLIC_API_URL=http://localhost:8080
+# В Docker за nginx используйте __RELATIVE__ (см. docker-compose); иначе полный URL API.
+ARG NEXT_PUBLIC_API_URL=__RELATIVE__
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 RUN npm run build
 
 FROM node:20-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV PORT=8080
 ENV HOSTNAME=0.0.0.0
 
 RUN addgroup --system --gid 1001 nodejs \
@@ -26,5 +26,5 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
-EXPOSE 3000
+EXPOSE 8080
 CMD ["node", "server.js"]
