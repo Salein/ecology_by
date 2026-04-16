@@ -173,7 +173,13 @@ function formatCompactBelarusNumber(raw: string): string[] | null {
         lines.push(raw);
         continue;
       }
-      lines.push(formatByAreaAndLocal(parsed.area, parsed.locals[0]));
+      const loc0 = parsed.locals[0];
+      if (loc0 === undefined) {
+        lines.push(raw);
+        continue;
+      }
+      const line = formatByAreaAndLocal(parsed.area, loc0);
+      lines.push(line ?? raw);
     }
     return lines;
   }

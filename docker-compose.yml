@@ -23,12 +23,19 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
       - ecology_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
   api:
     build: ./server
     restart: unless-stopped
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     environment:
       CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:8080}
       JWT_SECRET: ${JWT_SECRET:-docker-dev-change-jwt-secret}
