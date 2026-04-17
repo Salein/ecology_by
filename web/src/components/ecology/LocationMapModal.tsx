@@ -57,13 +57,13 @@ function LocationMapModalOpen({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4 sm:p-6"
       role="dialog"
       aria-modal="true"
       aria-label="Выбор местоположения на карте"
     >
-      <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-emerald-100/80 bg-white shadow-xl shadow-emerald-900/5">
-        <div className="flex items-center justify-between border-b border-emerald-100 bg-emerald-50/50 px-4 py-3">
+      <div className="flex max-h-[88vh] w-full max-w-[min(100%,64rem)] flex-col overflow-hidden rounded-2xl border border-emerald-100/80 bg-white shadow-xl shadow-emerald-900/5">
+        <div className="flex shrink-0 items-center justify-between border-b border-emerald-100 bg-emerald-50/50 px-4 py-3">
           <h2 className="text-lg font-medium text-emerald-950">Карта OpenStreetMap</h2>
           <button
             type="button"
@@ -73,14 +73,14 @@ function LocationMapModalOpen({
             Закрыть
           </button>
         </div>
-        <p className="px-4 py-2 text-sm text-emerald-900/65">
+        <p className="shrink-0 px-4 py-2 text-sm text-emerald-900/65">
           Нажмите на карту, чтобы поставить метку. Тайлы: © участники OpenStreetMap.
         </p>
-        <div className="relative min-h-[320px] flex-1">
+        <div className="relative min-h-[200px] w-full shrink-0 overflow-hidden">
           <MapContainer
             center={pos}
             zoom={12}
-            className="h-[min(60vh,420px)] w-full z-0"
+            className="z-0 h-[min(42vh,320px)] w-full sm:h-[min(46vh,380px)] md:h-[min(48vh,420px)]"
             scrollWheelZoom
           >
             <TileLayer
@@ -91,7 +91,7 @@ function LocationMapModalOpen({
             <Marker position={pos} />
           </MapContainer>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-emerald-100 bg-emerald-50/30 px-4 py-3">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-emerald-100 bg-emerald-50/30 px-4 py-3">
           <button
             type="button"
             onClick={onClose}

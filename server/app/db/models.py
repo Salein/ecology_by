@@ -30,6 +30,8 @@ class RegistryCacheMetaModel(Base):
     updated_at: Mapped[str] = mapped_column(String(64), nullable=False)
     source_signature: Mapped[str | None] = mapped_column(String(128), nullable=True)
     sources: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # [{sha256, part, name}, ...] — для слияния частей I/II при отдельных POST и для skip по набору файлов
+    import_sources_detail: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class RegistryRecordModel(Base):

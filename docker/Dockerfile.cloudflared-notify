@@ -1,0 +1,18 @@
+# Quick tunnel + shell-обёртка для уведомлений (официальный образ без /bin/sh).
+FROM alpine:3.19
+ARG TARGETARCH=amd64
+RUN apk add --no-cache curl ca-certificates \
+  && set -eu \
+  && case "$TARGETARCH" in \
+       amd64) u=amd64 ;; \
+       arm64) u=arm64 ;; \
+       *) u=amd64 ;; \
+     esac \
+  && curl -fsSL -o /usr/local/bin/cloudflared \
+       "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${u}" \
+  && chmod +x /usr/local/bin/cloudflared
+
+COPY tunnel-notify.sh /tunnel-notify.sh
+RUN chmod +x /tunnel-notify.sh
+
+ENTRYPOINT ["/bin/sh", "/tunnel-notify.sh"]

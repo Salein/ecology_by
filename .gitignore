@@ -17,6 +17,7 @@
 **/auth_users.json.tmp
 server/app/data/geocode_cache.json
 server/app/data/user_registry_cache.json
+server/app/data/password_reset_tokens.json
 
 # --- Python ---
 **/.venv/

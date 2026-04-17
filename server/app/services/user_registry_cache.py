@@ -4,7 +4,7 @@ import hashlib
 import io
 import re
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import pdfplumber
 from sqlalchemy import delete, func, select
@@ -18,16 +18,48 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def fingerprint_from_sha256_digests(digests: Iterable[str]) -> str:
+    ds = sorted(digests)
+    return hashlib.sha256("\n".join(ds).encode("utf-8")).hexdigest()
+
+
 def registry_files_fingerprint(files: list[tuple[str, bytes]]) -> str:
-    digests = sorted(hashlib.sha256(data).hexdigest() for _, data in files)
-    return hashlib.sha256("\n".join(digests).encode("utf-8")).hexdigest()
+    return fingerprint_from_sha256_digests(hashlib.sha256(data).hexdigest() for _, data in files)
+
+
+def import_payload_sha256_digests_sorted(payloads: list[tuple[str, bytes]]) -> list[str]:
+    return sorted(hashlib.sha256(raw).hexdigest() for _, raw in payloads)
+
+
+def _norm_text(v: object) -> str:
+    return " ".join(str(v or "").replace("\xa0", " ").split()).casefold()
+
+
+def load_import_sources_detail() -> list[dict[str, Any]] | None:
+    """None — мета до миграции или пусто; иначе список {sha256, part, name}."""
+    with session_scope() as session:
+        meta = session.get(RegistryCacheMetaModel, 1)
+        if not meta:
+            return None
+        raw = getattr(meta, "import_sources_detail", None)
+        if raw is None:
+            return None
+        if not isinstance(raw, list):
+            return None
+        out: list[dict[str, Any]] = []
+        for x in raw:
+            if isinstance(x, dict):
+                out.append(dict(x))
+        return out
 
 
 def save_user_registry_cache(
     sources: list[str],
     records: list[dict[str, Any]],
     source_signature: str,
+    import_sources_detail: list[dict[str, Any]] | None = None,
 ) -> None:
+    deduped = _dedupe_registry_records(records)
     with session_scope() as session:
         session.execute(delete(RegistryRecordModel))
         session.execute(delete(RegistryCacheMetaModel))
@@ -37,9 +69,10 @@ def save_user_registry_cache(
             updated_at=_utc_iso(),
             source_signature=source_signature,
             sources=sources,
+            import_sources_detail=import_sources_detail,
         )
         session.add(meta)
-        for row in records:
+        for row in deduped:
             if not isinstance(row, dict):
                 continue
             rec = RegistryRecordModel(
@@ -75,6 +108,33 @@ def _safe_float(v: object) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def registry_row_dedupe_key(row: dict[str, Any]) -> tuple[object, ...]:
+    """Ключ совпадения записи реестра (как при дедупе перед INSERT)."""
+    return (
+        _safe_int(row.get("source_part")),
+        _safe_int(row.get("id")),
+        _norm_text(row.get("waste_code")),
+        _norm_text(row.get("owner")),
+        _norm_text(row.get("object_name")),
+        _norm_text(row.get("address")),
+    )
+
+
+def _dedupe_registry_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Удаляет идентичные записи в рамках одной source_part перед сохранением в БД."""
+    seen: set[tuple[object, ...]] = set()
+    out: list[dict[str, Any]] = []
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        key = registry_row_dedupe_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
 
 
 _POSTAL_LOCALITY_RE = re.compile(

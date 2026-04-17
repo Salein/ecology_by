@@ -47,7 +47,8 @@ JWT_SECRET=длинный-случайный-секрет
 BOOTSTRAP_OWNER_EMAIL=you@example.com
 BOOTSTRAP_OWNER_PASSWORD=не_менее_8_символов
 
-# URL, с которого пользователь открывает сайт (CORS + NEXT_PUBLIC_API_URL при сборке web)
+# CORS: тот же scheme+host+port, с которого открываете UI (localhost и 127.0.0.1 для браузера — разные origins).
+# Сборка web в compose использует относительные `/api/...` за nginx, чтобы не ломать cookie при смене host.
 PUBLIC_ORIGIN=http://localhost:8080
 
 # Опционально: другой порт на хосте
@@ -190,7 +191,8 @@ npm run dev
 1. Скачайте с [страницы реестров ecoinfo.by](https://www.ecoinfo.by/%D0%B0%D0%B4%D0%BC%D0%B8%D0%BD%D0%B8%D1%81%D1%82%D1%80%D0%B0%D1%82%D0%B8%D0%B2%D0%BD%D1%8B%D0%B5-%D0%BF%D1%80%D0%BE%D1%86%D0%B5%D0%B4%D1%83%D1%80%D1%8B/%D1%80%D0%B5%D0%B5%D1%81%D1%82%D1%80%D1%8B) файлы «Реестр объектов по использованию отходов (часть I)» и при необходимости «(часть II)».
 2. На сайте нажмите **«Загрузить реестр»** и выберите один или несколько PDF.
 3. Сервер парсит документы, геокодирует адреса (с паузой между запросами к Nominatim), сохраняет структурированные данные в таблицу `registry_records`, координаты адресов — в `geocode_cache`.
-4. Повторная загрузка не обязательна: поиск идёт из кэша, пока вы не очистите его (`DELETE /api/v1/registry/cache`) или не загрузите реестр снова (кэш перезапишется).
+4. В поиске расстояние считается **по дорогам** через OSRM (`DISTANCE_MODE=road`, по умолчанию); при недоступном роутинге будет fallback «по прямой».
+5. Повторная загрузка не обязательна: поиск идёт из кэша, пока вы не очистите его (`DELETE /api/v1/registry/cache`) или не загрузите реестр снова (кэш перезапишется).
 
 Большие PDF обрабатываются долго (тысячи записей и геокодирование) — на интерфейсе отображаются прогресс и skeleton списка.
 
@@ -225,4 +227,4 @@ npm run dev
 
 ## Лицензии и данные
 
-Тайлы: © [OpenStreetMap](https://www.openstreetmap.org/copyright). Геокодинг: [Nominatim](https://nominatim.org/) — [политика использования](https://operations.osmfoundation.org/policies/nominatim/). Содержание реестров PDF определяется их правообладателями.
+Тайлы: © [OpenStreetMap](https://www.openstreetmap.org/copyright). Геокодинг: [Nominatim](https://nominatim.org/) — [политика использования](https://operations.osmfoundation.org/policies/nominatim/). Расстояние по дорогам: [OSRM](https://project-osrm.org/) (по умолчанию [router.project-osrm.org](https://router.project-osrm.org/)). Содержание реестров PDF определяется их правообладателями.

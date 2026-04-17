@@ -73,7 +73,25 @@ export default function RootLayout({
               >
                 политика использования
               </a>
-              . Содержание реестров PDF принадлежит{" "}
+              . Маршрутизация по дорогам:{" "}
+              <a
+                href="https://project-osrm.org/"
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-emerald-900 underline decoration-emerald-300/90 underline-offset-2 transition hover:text-emerald-950 hover:decoration-emerald-600"
+              >
+                OSRM
+              </a>{" "}
+              (по умолчанию публичный сервис{" "}
+              <a
+                href="https://router.project-osrm.org/"
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-emerald-900 underline decoration-emerald-300/90 underline-offset-2 transition hover:text-emerald-950 hover:decoration-emerald-600"
+              >
+                router.project-osrm.org
+              </a>
+              ; данные маршрутов основаны на OpenStreetMap). Содержание реестров PDF принадлежит{" "}
               <a
                 href="https://ecoinfo.by"
                 target="_blank"

@@ -9,7 +9,9 @@ from app.services.user_registry_cache import (
     cache_meta,
     cached_registry_signature,
     clear_user_registry_cache,
+    import_payload_sha256_digests_sorted,
     load_cached_registry_records,
+    load_import_sources_detail,
     registry_files_fingerprint,
 )
 
@@ -53,13 +55,25 @@ async def registry_import(
             raise HTTPException(status_code=400, detail=f"Пустой файл: {f.filename!r}")
         payloads.append((f.filename, raw))
 
-    fingerprint = registry_files_fingerprint(payloads)
-    cached_sig = cached_registry_signature()
-    if (
-        cached_sig
-        and fingerprint == cached_sig
-        and len(load_cached_registry_records()) > 0
-    ):
+    n_cached = len(load_cached_registry_records())
+    incoming_digests = import_payload_sha256_digests_sorted(payloads)
+    detail = load_import_sources_detail()
+    skip = False
+    # Для одного файла намеренно НЕ делаем skip даже при совпадающем SHA:
+    # это позволяет догружать пропущенные записи при повторном импорте той же части.
+    if n_cached > 0 and len(payloads) > 1:
+        if detail:
+            stored_digests = sorted(
+                str(x.get("sha256") or "")
+                for x in detail
+                if isinstance(x, dict) and x.get("sha256")
+            )
+            skip = bool(stored_digests) and stored_digests == incoming_digests
+        else:
+            fingerprint = registry_files_fingerprint(payloads)
+            cached_sig = cached_registry_signature()
+            skip = bool(cached_sig and fingerprint == cached_sig)
+    if skip:
         return {
             "skipped": True,
             "job_id": None,
@@ -70,6 +84,7 @@ async def registry_import(
         }
 
     job_id = create_job()
+    fingerprint = registry_files_fingerprint(payloads)
     background_tasks.add_task(run_registry_import_job, job_id, payloads, fingerprint)
     return {"skipped": False, "job_id": job_id}
 

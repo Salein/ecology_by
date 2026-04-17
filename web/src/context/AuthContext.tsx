@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { authLogout, getApiBase } from "@/lib/api";
+import { apiUrl, authLogout } from "@/lib/api";
 import { clearLegacyAuthStorage, clearSessionGate, setSessionGate } from "@/lib/sessionGate";
 
 export type AuthUser = {
@@ -75,7 +75,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const ctrl = new AbortController();
     const timeoutId = setTimeout(() => ctrl.abort(), AUTH_ME_TIMEOUT_MS);
     try {
-      const r = await fetch(`${getApiBase()}/api/v1/auth/me`, { ...cred, signal: ctrl.signal });
+      const r = await fetch(apiUrl("/api/v1/auth/me"), { ...cred, signal: ctrl.signal });
       if (!r.ok) {
         if (r.status === 401 || r.status === 403) {
           try {
@@ -110,7 +110,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (email: string, password: string) => {
     const r = await fetchWithTimeout(
-      `${getApiBase()}/api/v1/auth/login`,
+      apiUrl("/api/v1/auth/login"),
       {
         ...cred,
         method: "POST",
@@ -127,7 +127,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const register = useCallback(async (email: string, password: string, name: string) => {
     const r = await fetchWithTimeout(
-      `${getApiBase()}/api/v1/auth/register`,
+      apiUrl("/api/v1/auth/register"),
       {
         ...cred,
         method: "POST",

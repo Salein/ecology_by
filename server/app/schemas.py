@@ -27,7 +27,17 @@ class WasteObjectOut(BaseModel):
     waste_code: str | None = None
     waste_type_name: str | None = None
     accepts_external_waste: bool = True
+    # Для обратной совместимости: "основная" дистанция (по дорогам, если есть, иначе по воздуху)
     distance_km: float | None = None
+    # Явные поля двух методов расчёта
+    distance_air_km: float | None = None
+    distance_road_km: float | None = None
+    # Причина, если маршрут по дорогам не удалось посчитать
+    distance_road_error: str | None = None
+    # Все дистанции в выдаче являются оценочными; spread — ориентировочный разброс (± км).
+    distance_is_approx: bool = True
+    distance_spread_km: float | None = None
+    distance_spread_note: str | None = None
     distance_note: str | None = None
 
 

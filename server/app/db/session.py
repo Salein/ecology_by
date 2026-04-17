@@ -16,7 +16,15 @@ _ENGINE = create_engine(
     pool_size=settings.database_pool_size,
     max_overflow=settings.database_max_overflow,
 )
-SessionLocal = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False, future=True)
+SessionLocal = sessionmaker(
+    bind=_ENGINE,
+    autoflush=False,
+    autocommit=False,
+    future=True,
+    # Сервисный код нередко читает ORM-объекты после выхода из session_scope().
+    # Не "протухаем" атрибуты на commit, чтобы избежать DetachedInstanceError.
+    expire_on_commit=False,
+)
 
 
 def get_db_session() -> Session:

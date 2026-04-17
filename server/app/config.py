@@ -53,12 +53,29 @@ class Settings:
         "ecology-demo/1.0 (local dev; contact@example.com)",
     )
     nominatim_timeout_sec: float = float(os.getenv("NOMINATIM_TIMEOUT_SEC", "3.0"))
+    # Свой Nominatim (Docker) — можно снизить REGISTRY_GEOCODE_DELAY_SEC до 0.
+    nominatim_base_url: str = (
+        os.getenv("NOMINATIM_BASE_URL") or "https://nominatim.openstreetmap.org"
+    ).strip().rstrip("/")
     registry_closest_limit: int = int(os.getenv("REGISTRY_CLOSEST_LIMIT", "7"))
+    # Минимум секунд между запросами к публичному Nominatim (учитывается время самого HTTP-запроса).
     registry_geocode_delay_sec: float = float(os.getenv("REGISTRY_GEOCODE_DELAY_SEC", "1.1"))
     # За один поиск — не больше запросов к Nominatim по адресам без координат (остальные без расстояния)
     registry_search_geocode_max: int = _int_env("REGISTRY_SEARCH_GEOCODE_MAX", 8)
+    # Во время импорта реестра сохраняем промежуточный прогресс каждые N записей.
+    # Это позволяет не терять уже обработанные записи при аварийной остановке сервиса.
+    registry_import_checkpoint_every: int = _int_env("REGISTRY_IMPORT_CHECKPOINT_EVERY", 50)
     # Общий бюджет времени на on-demand геокодирование в одном поиске
     registry_search_geocode_budget_sec: float = float(os.getenv("REGISTRY_SEARCH_GEOCODE_BUDGET_SEC", "8.0"))
+    # Режим дистанции: road (по дорогам, OSRM) или air (по прямой, Haversine)
+    distance_mode: str = (os.getenv("DISTANCE_MODE") or "road").strip().lower()
+    # OSRM endpoint для расчёта дистанции по дорогам
+    osrm_base_url: str = (
+        os.getenv("OSRM_BASE_URL") or "https://router.project-osrm.org"
+    ).strip().rstrip("/")
+    osrm_timeout_sec: float = float(os.getenv("OSRM_TIMEOUT_SEC", "2.5"))
+    # Сколько кандидатов максимум проверять роутингом за один поиск
+    road_distance_candidates: int = _int_env("ROAD_DISTANCE_CANDIDATES", 25)
     # JWT (в продакшене задайте свой секрет)
     jwt_secret: str = os.getenv("JWT_SECRET", "ecology-dev-change-me-in-production")
     jwt_expire_hours: int = _int_env("JWT_EXPIRE_HOURS", 168)
@@ -80,6 +97,14 @@ class Settings:
     database_echo: bool = os.getenv("DATABASE_ECHO", "").lower() in ("1", "true", "yes")
     database_pool_size: int = _int_env("DATABASE_POOL_SIZE", 10)
     database_max_overflow: int = _int_env("DATABASE_MAX_OVERFLOW", 20)
+
+    def __post_init__(self) -> None:
+        key_len = len(self.jwt_secret.encode("utf-8"))
+        if key_len < 32:
+            raise ValueError(
+                "JWT_SECRET must be at least 32 bytes for HS256 (RFC 7518). "
+                f"Current length is {key_len}."
+            )
 
 
 settings = Settings()

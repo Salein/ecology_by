@@ -8,6 +8,12 @@
 #   docker compose up --build
 #   Откройте http://localhost:8080
 #
+# Публичная ссылка (Cloudflare Tunnel):
+#   Быстрый *.trycloudflare.com — cloudflared: опционально NOTIFY_WEBHOOK_URL в .env (POST JSON с URL);
+#     docker compose --profile tunnel up -d --build
+#   Постоянный URL (Zero Trust token) — профиль tunnel-token, уведомления не нужны:
+#     CLOUDFLARE_TUNNEL_TOKEN в .env → docker compose --profile tunnel-token up -d
+#
 # Другой домен (VPS): задайте в файле .env рядом с compose:
 #   PUBLIC_ORIGIN=https://example.com
 #   JWT_SECRET=...
@@ -38,7 +44,8 @@ services:
         condition: service_healthy
     environment:
       CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:8080}
-      JWT_SECRET: ${JWT_SECRET:-docker-dev-change-jwt-secret}
+      # HS256: не короче 32 байт (см. RFC 7518 / PyJWT)
+      JWT_SECRET: ${JWT_SECRET:-docker-dev-change-me-jwt-secret!!}
       AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-0}
       BOOTSTRAP_OWNER_EMAIL: ${BOOTSTRAP_OWNER_EMAIL:-}
@@ -51,22 +58,58 @@ services:
     build:
       context: ./web
       args:
-        NEXT_PUBLIC_API_URL: ${PUBLIC_ORIGIN:-http://localhost:8080}
+        # Относительные URL `/api/...` — работает и с localhost, и с 127.0.0.1 за одним nginx
+        NEXT_PUBLIC_API_URL: __RELATIVE__
     restart: unless-stopped
     depends_on:
       - api
 
   edge:
-    image: nginx:1.27-alpine
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.edge
+    image: ecology-edge
     restart: unless-stopped
     ports:
       - "${HTTP_PORT:-8080}:80"
-    volumes:
-      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - api
       - web
 
+  # Быстрый туннель: свой образ (Alpine + cloudflared + уведомление при смене trycloudflare URL).
+  cloudflared:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.cloudflared-notify
+    image: ecology-cloudflared-notify
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    depends_on:
+      edge:
+        condition: service_started
+    environment:
+      TUNNEL_ORIGIN_SERVICE: ${TUNNEL_ORIGIN_SERVICE:-edge}
+      NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
+    volumes:
+      - ecology_tunnel_notify_state:/data
+
+  # Именованный туннель из Zero Trust (token → переменная TUNNEL_TOKEN читает cloudflared).
+  cloudflared-token:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel-token"]
+    restart: unless-stopped
+    depends_on:
+      edge:
+        condition: service_started
+    environment:
+      # Задайте в .env перед запуском: docker compose --profile tunnel-token up -d
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+
 volumes:
   ecology_api_data:
   ecology_postgres_data:
+  ecology_tunnel_notify_state:

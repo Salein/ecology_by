@@ -27,7 +27,7 @@ const LOCATION_PLACEHOLDER = "Выберите местоположение об
 
 /** Сетка строки результатов: код | собственник | объект | адрес | телефоны | по воздуху | по дорогам */
 const RESULT_GRID =
-  "sm:grid-cols-[minmax(5rem,5.5rem)_minmax(14.2rem,1.15fr)_minmax(14.2rem,1.15fr)_minmax(16.2rem,1.4fr)_minmax(10.1rem,0.95fr)_minmax(7.4rem,0.8fr)_minmax(7.4rem,0.8fr)]";
+  "sm:grid-cols-[minmax(5rem,5.5rem)_minmax(14.2rem,1.15fr)_minmax(14.2rem,1.15fr)_minmax(16.2rem,1.4fr)_minmax(10.1rem,0.95fr)_minmax(calc(7.4rem_-_10px),0.8fr)_minmax(calc(7.4rem_-_10px),0.8fr)]";
 
 function formatDistance(km: number | null | undefined): string {
   if (km == null || Number.isNaN(km)) return EM_DASH;
@@ -255,15 +255,23 @@ function DistanceCalculationLoader() {
 
   return (
     <div
-      className="relative overflow-hidden rounded-2xl border border-emerald-200/80 bg-gradient-to-br from-emerald-50 via-lime-50 to-amber-50 shadow-sm shadow-emerald-900/5"
+      className="relative mx-auto w-fit max-w-full overflow-hidden rounded-2xl border border-emerald-200/80 bg-gradient-to-br from-emerald-50 via-lime-50 to-amber-50 shadow-sm shadow-emerald-900/5"
       role="status"
       aria-live="polite"
       aria-busy="true"
     >
-      <div className="relative min-h-[48vh] w-full sm:min-h-[50vh]">
-        <div className="eco-loader-image absolute inset-0 bg-[url('/loader/eco-loader.png')] bg-contain bg-center bg-no-repeat" />
-        <div className="eco-loader-light absolute inset-0 bg-gradient-to-r from-emerald-300/10 via-amber-100/35 to-lime-200/20" />
-        <div className="absolute inset-0 bg-gradient-to-t from-emerald-950/45 via-emerald-900/20 to-transparent" />
+      <div className="relative inline-block max-w-full">
+        {/* eslint-disable-next-line @next/next/no-img-element -- локальный ассет, без layout shift */}
+        <img
+          src="/loader/eco-loader.png"
+          alt=""
+          width={756}
+          height={834}
+          decoding="async"
+          className="eco-loader-image block h-auto max-h-[min(52vh,560px)] w-auto max-w-full"
+        />
+        <div className="eco-loader-light pointer-events-none absolute inset-0 bg-gradient-to-r from-emerald-300/10 via-amber-100/35 to-lime-200/20" />
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-emerald-950/45 via-emerald-900/20 to-transparent" />
         <div className="pointer-events-none absolute inset-0">
           {leaves.map((leaf, i) => (
             <span
@@ -273,7 +281,7 @@ function DistanceCalculationLoader() {
             />
           ))}
         </div>
-        <div className="absolute inset-x-0 bottom-0 p-4 sm:p-5">
+        <div className="absolute inset-x-0 bottom-0 p-3 sm:p-4">
           <div className="inline-flex max-w-full flex-col rounded-xl border border-emerald-100/60 bg-emerald-950/35 px-3 py-2 backdrop-blur-[1px]">
             <p className="text-sm font-semibold text-emerald-50">Идёт расчёт расстояний…</p>
             <p className="mt-0.5 text-xs leading-relaxed text-emerald-100/90">
@@ -443,19 +451,53 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
       setImportError(null);
       setImportBusy(true);
       setImportProgress(0);
-      setImportMessage("Отправка файлов на сервер…");
+      setImportMessage("Подготовка загрузки…");
       try {
-        const post = await postRegistryImportWithUploadProgress(files, (up) => {
-          setImportProgress(Math.min(35, Math.round(up * 0.35)));
-          setImportMessage("Отправка файлов на сервер…");
-        });
+        const total = files.length;
+        for (let i = 0; i < total; i += 1) {
+          const file = files[i];
+          const base = Math.round((i / total) * 100);
+          const span = Math.max(1, Math.round(100 / total));
+          const progressForFile = (pctInFile: number) =>
+            Math.min(100, Math.round(base + (pctInFile / 100) * span));
+          const prefix = total > 1 ? `Файл ${i + 1}/${total}: ${file.name}. ` : "";
 
-        if (post.skipped) {
-          if (post.cache) {
-            setCacheMeta(post.cache);
-            setRegistryMetaError(null);
-            setCacheMetaReady(true);
+          setImportMessage(`${prefix}Отправка на сервер…`);
+          const post = await postRegistryImportWithUploadProgress([file], (up) => {
+            setImportProgress(progressForFile(Math.min(35, Math.round(up * 0.35))));
+            setImportMessage(`${prefix}Отправка на сервер…`);
+          });
+
+          if (post.skipped) {
+            if (post.cache) {
+              setCacheMeta(post.cache);
+              setRegistryMetaError(null);
+              setCacheMetaReady(true);
+            } else {
+              const res = await fetchRegistryCacheMetaResult();
+              setCacheMetaReady(true);
+              if (res.ok) {
+                setCacheMeta(res.cache);
+                setRegistryMetaError(null);
+              } else {
+                setCacheMeta(null);
+                setRegistryMetaError(res.reason);
+              }
+            }
+            setImportMessage(prefix + (post.message || "Данные совпадают с кэшем — импорт пропущен."));
+            setImportProgress(Math.min(100, base + span));
           } else {
+            for (;;) {
+              const st = await fetchRegistryImportStatus(post.job_id);
+              setImportMessage(prefix + (st.message || st.status));
+              setImportProgress(progressForFile(Math.min(100, Math.round(35 + st.progress * 0.65))));
+              if (st.status === "done") break;
+              if (st.status === "error") {
+                throw new Error(st.error || "Ошибка обработки реестра");
+              }
+              await new Promise((r) => setTimeout(r, 450));
+            }
+
             const res = await fetchRegistryCacheMetaResult();
             setCacheMetaReady(true);
             if (res.ok) {
@@ -465,51 +507,18 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
               setCacheMeta(null);
               setRegistryMetaError(res.reason);
             }
+            setImportMessage(total > 1 ? `Файл ${i + 1}/${total} обработан.` : "Готово. Обновляем список…");
+            setImportProgress(Math.min(100, base + span));
           }
-          setImportMessage(post.message || "Данные совпадают с кэшем — импорт пропущен.");
-          setImportProgress(100);
-          await runSearch();
-        } else {
-          for (;;) {
-            const st = await fetchRegistryImportStatus(post.job_id);
-            setImportMessage(st.message || st.status);
-            setImportProgress(Math.min(100, Math.round(35 + st.progress * 0.65)));
-            if (st.status === "done") break;
-            if (st.status === "error") {
-              throw new Error(st.error || "Ошибка обработки реестра");
-            }
-            await new Promise((r) => setTimeout(r, 450));
-          }
-
-          const res = await fetchRegistryCacheMetaResult();
-          setCacheMetaReady(true);
-          if (res.ok) {
-            setCacheMeta(res.cache);
-            setRegistryMetaError(null);
-          } else {
-            setCacheMeta(null);
-            setRegistryMetaError(res.reason);
-          }
-          setImportMessage("Готово. Обновляем список…");
-          setImportProgress(100);
-          await runSearch();
         }
+        setImportMessage("Готово. Обновляем список…");
+        setImportProgress(100);
+        await runSearch();
       } catch (e) {
         let msg =
           e instanceof Error && e.message
             ? e.message
             : "Ошибка загрузки";
-        const uploadingMultiple = files.length > 1;
-        if (
-          uploadingMultiple &&
-          /ошибка загрузки|import status failed|network|сеть|fetch|500|502|503|504/i.test(
-            msg,
-          )
-        ) {
-          msg =
-            "Сервис обработки реестра не смог корректно завершить совместную обработку двух PDF. " +
-            "Попробуйте загрузить файлы по одному и проверьте, что API и фоновые воркеры запущены (см. логи docker compose).";
-        }
         setImportError(msg);
       } finally {
         setImportBusy(false);
@@ -547,8 +556,8 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
 
   return (
     <div className="relative z-10 mx-auto flex w-full max-w-[min(100%,96rem)] flex-col gap-8 px-4 py-10 sm:px-6">
-      <div className="flex flex-wrap items-center justify-end gap-2 text-sm">
-        <span className="mr-auto text-emerald-900/70">
+      <div className="relative z-10 flex flex-wrap items-center justify-end gap-2 pl-10 text-sm sm:pl-16 md:pl-24 lg:pl-28">
+        <span className="mr-auto min-w-0 text-emerald-900/70">
           {user?.name ? (
             <>
               <span className="font-medium text-emerald-950">{user.name}</span>
@@ -784,7 +793,7 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
 
       <section className="space-y-3">
         <div
-          className={`hidden gap-3 px-3 text-xs font-semibold uppercase tracking-wide text-emerald-800/70 sm:grid sm:gap-x-5 sm:gap-y-2 ${RESULT_GRID}`}
+          className={`hidden gap-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-emerald-800/70 sm:grid sm:gap-x-5 sm:gap-y-2 ${RESULT_GRID}`}
         >
           <span>Код объекта</span>
           <span>Собственник</span>
@@ -814,37 +823,37 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
                 key={`${row.waste_code ?? "x"}-${row.id}-${idx}`}
                 className={`grid grid-cols-1 gap-3 rounded-2xl border border-emerald-100/90 bg-white/95 p-3 shadow-sm shadow-emerald-900/5 ${RESULT_GRID} sm:items-start sm:gap-x-5 sm:gap-y-3`}
               >
-                <div className="text-sm font-semibold text-emerald-900/90 sm:pt-0.5 sm:text-base">{row.id}</div>
-                <div className="min-w-0 break-words text-base leading-snug text-stone-800 sm:pt-0.5">
+                <div className="text-xs font-semibold text-emerald-900/90 sm:pt-0.5 sm:text-sm">{row.id}</div>
+                <div className="min-w-0 break-words text-sm leading-snug text-stone-800 sm:pt-0.5">
                   {formatOwnerDisplay(row.owner)}
                 </div>
-                <div className="flex min-w-0 flex-col gap-2 rounded-xl border border-emerald-100/70 bg-emerald-50/70 px-4 py-3 text-base leading-snug text-stone-800 break-words">
+                <div className="flex min-w-0 flex-col gap-2 rounded-xl border border-emerald-100/70 bg-emerald-50/70 px-4 py-3 text-sm leading-snug text-stone-800 break-words">
                   <span className="min-w-0">{row.object_name}</span>
                   {row.accepts_external_waste !== false ? (
-                    <span className="inline-flex w-fit max-w-full rounded-lg border border-emerald-200/80 bg-white/80 px-2 py-1 text-sm font-medium leading-tight text-emerald-950">
+                    <span className="inline-flex w-fit max-w-full rounded-lg border border-emerald-200/80 bg-white/80 px-2 py-1 text-xs font-medium leading-tight text-emerald-950">
                       Принимает отходы от других лиц
                     </span>
                   ) : null}
                 </div>
                 <div className="min-w-0">
-                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-emerald-800/40 sm:sr-only">
+                  <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-emerald-800/40 sm:sr-only">
                     Адрес объекта
                   </span>
-                  <div className="min-w-0 break-words rounded-xl border border-emerald-100/70 bg-emerald-50/40 px-4 py-3 text-base leading-relaxed text-stone-800">
+                  <div className="min-w-0 break-words rounded-xl border border-emerald-100/70 bg-emerald-50/40 px-4 py-3 text-sm leading-relaxed text-stone-800">
                     {formatAddressDisplay(row.address, row.owner, row.object_name)}
                   </div>
                 </div>
                 <div className="min-w-0">
-                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-emerald-800/40 sm:sr-only">
+                  <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-emerald-800/40 sm:sr-only">
                     Телефоны
                   </span>
-                  <div className="rounded-xl border border-emerald-100/70 bg-emerald-50/40 px-4 py-3 text-sm leading-relaxed text-stone-800 break-words tabular-nums">
+                  <div className="rounded-xl border border-emerald-100/70 bg-emerald-50/40 px-4 py-3 text-xs leading-relaxed text-stone-800 break-words tabular-nums">
                     {formatPhonesDisplay(row.phones)}
                   </div>
                 </div>
                 <div className="flex min-w-0 w-full flex-col items-stretch gap-1.5 sm:items-end sm:justify-end sm:pt-0.5">
                   <span
-                    className="inline-flex w-full justify-center rounded-xl border border-emerald-200/60 bg-emerald-100/95 px-3 py-2.5 text-sm font-medium text-emerald-900"
+                    className="inline-flex w-full justify-center rounded-xl border border-emerald-200/60 bg-emerald-100/95 px-3 py-2.5 text-xs font-medium text-emerald-900"
                     title={
                       locationChosen && distanceIsMissing(row.distance_air_km)
                         ? DISTANCE_NOT_CALCULATED_NOTE
@@ -855,25 +864,25 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
                   </span>
                   {row.distance_is_approx && row.distance_spread_km != null ? (
                     <span
-                      className="w-full text-right text-[13px] leading-snug text-emerald-900/85 sm:max-w-[14.5rem]"
+                      className="w-full text-right text-[11px] leading-snug text-emerald-900/85 sm:max-w-[14.5rem]"
                       title={row.distance_spread_note || "Ориентировочный разброс"}
                     >
                       {`примерно ${formatSpread(row.distance_spread_km)}`}
                     </span>
                   ) : null}
                   {row.distance_note?.trim() ? (
-                    <span className="w-full text-right text-[13px] leading-snug text-stone-800 sm:max-w-[14.5rem]">
+                    <span className="w-full text-right text-[11px] leading-snug text-stone-800 sm:max-w-[14.5rem]">
                       {row.distance_note.trim()}
                     </span>
                   ) : locationChosen && distanceIsMissing(row.distance_air_km) ? (
-                    <span className="w-full text-right text-[13px] leading-snug text-amber-900/70 sm:max-w-[14.5rem]">
+                    <span className="w-full text-right text-[11px] leading-snug text-amber-900/70 sm:max-w-[14.5rem]">
                       {DISTANCE_NOT_CALCULATED_NOTE}
                     </span>
                   ) : null}
                 </div>
                 <div className="flex min-w-0 w-full flex-col items-stretch gap-1.5 sm:items-end sm:justify-end sm:pt-0.5">
                   <span
-                    className="inline-flex w-full justify-center rounded-xl border border-emerald-200/60 bg-emerald-100/95 px-3 py-2.5 text-sm font-medium text-emerald-900"
+                    className="inline-flex w-full justify-center rounded-xl border border-emerald-200/60 bg-emerald-100/95 px-3 py-2.5 text-xs font-medium text-emerald-900"
                     title={
                       locationChosen && distanceIsMissing(row.distance_road_km)
                         ? row.distance_road_error?.trim() || ROAD_DISTANCE_NOT_CALCULATED_NOTE
@@ -883,12 +892,12 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
                     {formatDistance(row.distance_road_km)}
                   </span>
                   {locationChosen && distanceIsMissing(row.distance_road_km) ? (
-                    <span className="w-full text-right text-[13px] leading-snug text-amber-900/80 sm:max-w-[14.5rem]">
+                    <span className="w-full text-right text-[11px] leading-snug text-amber-900/80 sm:max-w-[14.5rem]">
                       {row.distance_road_error?.trim() || ROAD_DISTANCE_NOT_CALCULATED_NOTE}
                     </span>
                   ) : row.distance_is_approx && row.distance_spread_km != null ? (
                     <span
-                      className="w-full text-right text-[13px] leading-snug text-emerald-900/85 sm:max-w-[14.5rem]"
+                      className="w-full text-right text-[11px] leading-snug text-emerald-900/85 sm:max-w-[14.5rem]"
                       title={row.distance_spread_note || "Ориентировочный разброс"}
                     >
                       {`примерно ${formatSpread(row.distance_spread_km)}`}
@@ -901,7 +910,7 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
         )}
 
         {!showSkeleton && rows.length === 0 && !error ? (
-          <p className="text-center text-sm text-emerald-900/45">
+          <p className="text-center text-xs text-emerald-900/45">
             Нет данных: загрузите реестр PDF или измените запрос / точку на карте.
           </p>
         ) : null}
@@ -919,10 +928,8 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
         }}
       />
       {showDistanceSearchLoader ? (
-        <div className="fixed inset-0 z-[120] flex items-start justify-center bg-emerald-950/35 px-4 py-6 backdrop-blur-[1.5px]">
-          <div className="w-full max-w-[min(100%,96rem)]">
-            <DistanceCalculationLoader />
-          </div>
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-emerald-950/35 px-4 py-6 backdrop-blur-[1.5px]">
+          <DistanceCalculationLoader />
         </div>
       ) : null}
     </div>
