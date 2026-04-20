@@ -3,9 +3,9 @@ import { WelcomePage } from "@/components/auth/WelcomePage";
 
 export default function Home() {
   return (
-    <div className="relative min-h-full flex-1 overflow-x-hidden">
+    <div className="relative isolate min-h-full flex-1 overflow-x-hidden">
       <LeafCornerAccent />
-      <section className="mx-auto w-full max-w-5xl px-4 pt-10 sm:px-6 sm:pt-14">
+      <section className="relative z-10 mx-auto w-full max-w-5xl px-4 pt-10 sm:px-6 sm:pt-14">
         <div className="rounded-3xl border border-emerald-100/90 bg-white/95 p-6 shadow-sm shadow-emerald-900/5 sm:p-8">
           <h1 className="text-3xl font-semibold tracking-tight text-emerald-950 sm:text-4xl">
             Экология Беларуси: поиск объектов обращения с отходами
@@ -39,7 +39,9 @@ export default function Home() {
           </div>
         </div>
       </section>
-      <WelcomePage />
+      <div className="relative z-10">
+        <WelcomePage />
+      </div>
     </div>
   );
 }

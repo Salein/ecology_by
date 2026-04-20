@@ -7,6 +7,7 @@
 # Локально:
 #   docker compose up --build
 #   Откройте http://localhost:8080
+# Одновременно с туннелем: profile tunnel + тот же edge; API разрешает localhost/127.0.0.1 и *.trycloudflare.com (CORS).
 #
 # Публичная ссылка (Cloudflare Tunnel):
 #   Быстрый *.trycloudflare.com — cloudflared: опционально NOTIFY_WEBHOOK_URL в .env (POST JSON с URL);
@@ -43,7 +44,9 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:8080}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      CORS_RELAX_TRY_TUNNEL: ${CORS_RELAX_TRY_TUNNEL:-1}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
       # HS256: не короче 32 байт (см. RFC 7518 / PyJWT)
       JWT_SECRET: ${JWT_SECRET:-docker-dev-change-me-jwt-secret!!}
       AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
@@ -93,7 +96,9 @@ services:
     volumes:
       - ecology_tunnel_notify_state:/data
 
-  # Именованный туннель из Zero Trust (token → переменная TUNNEL_TOKEN читает cloudflared).
+  # Именованный туннель: в корневом .env обязательно строка TUNNEL_TOKEN=eyJh... (токен из Zero Trust).
+  # Только env_file — без environment TUNNEL_TOKEN, иначе пустая ${...} подстановка compose затирает токен из .env.
+  # Профиль tunnel (quick) с этим не запускайте одновременно.
   cloudflared-token:
     image: cloudflare/cloudflared:latest
     profiles: ["tunnel-token"]
@@ -101,9 +106,8 @@ services:
     depends_on:
       edge:
         condition: service_started
-    environment:
-      # Задайте в .env перед запуском: docker compose --profile tunnel-token up -d
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    env_file:
+      - .env
     command:
       - tunnel
       - --no-autoupdate

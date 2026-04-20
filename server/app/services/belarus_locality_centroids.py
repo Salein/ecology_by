@@ -186,3 +186,76 @@ def approx_coords_from_by_text(address: str, object_name: str = "") -> tuple[flo
         if hit is not None:
             return hit[0], hit[1]
     return None
+
+
+def approx_coords_from_locality_in_address(address: str) -> tuple[float, float] | None:
+    """
+    Более строгий ориентир: извлекает населённый пункт по маркерам из адреса (г./аг./д./пос.).
+    Нужен для sanity-check, чтобы не цепляться за двусмысленные слова улиц.
+    """
+    if not address:
+        return None
+    merged = _load_merged_centers()
+    text = address.replace("\xa0", " ")
+    markers = re.findall(
+        r"\b(?:г\.|г/п|аг\.|д\.|дер\.|п\.|пос\.|поселок|городок)\s*([^,;\n]{1,80})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    stop_words = {
+        "район",
+        "районе",
+        "область",
+        "области",
+        "обл",
+        "обл.",
+        "вобласць",
+        "получения",
+        "использования",
+        "использованию",
+        "использует",
+        "принимает",
+        "отходов",
+        "вторичного",
+        "сырья",
+        "ул",
+        "улица",
+        "проспект",
+        "пр",
+        "пер",
+        "д",
+        "дом",
+    }
+    for m in markers:
+        tail = re.sub(r"\s+", " ", (m or "").strip())
+        if not tail:
+            continue
+        tail = re.sub(r"^[\"'«»()\[\]\-–—\s]+|[\"'«»()\[\]\-–—\s]+$", "", tail)
+        parts = [p for p in tail.split(" ") if p]
+        if not parts:
+            continue
+        trimmed: list[str] = []
+        for p in parts:
+            p_norm = re.sub(r"[^\wа-яёіўґ-]", "", p, flags=re.IGNORECASE).casefold()
+            if not p_norm:
+                continue
+            if p_norm in stop_words:
+                break
+            trimmed.append(p_norm)
+            if len(trimmed) >= 3:
+                break
+        if not trimmed:
+            continue
+        candidates: list[str] = []
+        joined = " ".join(trimmed)
+        if joined:
+            candidates.append(joined)
+        for i in range(min(3, len(trimmed)), 0, -1):
+            cand = " ".join(trimmed[:i]).strip()
+            if cand and cand not in candidates:
+                candidates.append(cand)
+        for cand in candidates:
+            hit = merged.get(cand)
+            if hit is not None:
+                return hit[0], hit[1]
+    return None

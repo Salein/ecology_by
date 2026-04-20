@@ -2,16 +2,29 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import re
+import signal
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 import pdfplumber
-from sqlalchemy import delete, func, select
+from sqlalchemy import text
+from sqlalchemy import delete, func, insert, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.config import settings
 from app.db.models import GeocodeCacheModel, RegistryCacheMetaModel, RegistryRecordModel
 from app.db.session import session_scope
 from app.services.registry_record_parser import repair_registry_address
+
+logger = logging.getLogger(__name__)
+_REGISTRY_INSERT_BATCH_SIZE = 2000
+_GEOCODE_UPSERT_BATCH_SIZE = 3000
+
+
+class _PdfPlumberPageTimeout(Exception):
+    pass
 
 
 def _utc_iso() -> str:
@@ -53,16 +66,38 @@ def load_import_sources_detail() -> list[dict[str, Any]] | None:
         return out
 
 
+def _registry_record_insert_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source_part": _safe_int(row.get("source_part")),
+        "record_id": _safe_int(row.get("id")),
+        "owner": str(row.get("owner") or ""),
+        "object_name": str(row.get("object_name") or ""),
+        "waste_code": str(row.get("waste_code")) if row.get("waste_code") is not None else None,
+        "waste_type_name": str(row.get("waste_type_name")) if row.get("waste_type_name") is not None else None,
+        "accepts_external_waste": bool(row.get("accepts_external_waste", True)),
+        "address": str(row.get("address")) if row.get("address") is not None else None,
+        "phones": str(row.get("phones")) if row.get("phones") is not None else None,
+        "lat": _safe_float(row.get("lat")),
+        "lon": _safe_float(row.get("lon")),
+        "payload": row,
+    }
+
+
 def save_user_registry_cache(
     sources: list[str],
-    records: list[dict[str, Any]],
+    records: Iterable[dict[str, Any]],
     source_signature: str,
     import_sources_detail: list[dict[str, Any]] | None = None,
+    assume_deduped: bool = False,
 ) -> None:
-    deduped = _dedupe_registry_records(records)
     with session_scope() as session:
-        session.execute(delete(RegistryRecordModel))
-        session.execute(delete(RegistryCacheMetaModel))
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            # Для больших объёмов в Postgres TRUNCATE заметно быстрее массового DELETE.
+            session.execute(text("TRUNCATE TABLE registry_records RESTART IDENTITY"))
+            session.execute(text("TRUNCATE TABLE registry_cache_meta"))
+        else:
+            session.execute(delete(RegistryRecordModel))
+            session.execute(delete(RegistryCacheMetaModel))
         meta = RegistryCacheMetaModel(
             id=1,
             version=2,
@@ -72,24 +107,15 @@ def save_user_registry_cache(
             import_sources_detail=import_sources_detail,
         )
         session.add(meta)
-        for row in deduped:
-            if not isinstance(row, dict):
-                continue
-            rec = RegistryRecordModel(
-                source_part=_safe_int(row.get("source_part")),
-                record_id=_safe_int(row.get("id")),
-                owner=str(row.get("owner") or ""),
-                object_name=str(row.get("object_name") or ""),
-                waste_code=str(row.get("waste_code")) if row.get("waste_code") is not None else None,
-                waste_type_name=str(row.get("waste_type_name")) if row.get("waste_type_name") is not None else None,
-                accepts_external_waste=bool(row.get("accepts_external_waste", True)),
-                address=str(row.get("address")) if row.get("address") is not None else None,
-                phones=str(row.get("phones")) if row.get("phones") is not None else None,
-                lat=_safe_float(row.get("lat")),
-                lon=_safe_float(row.get("lon")),
-                payload=row,
-            )
-            session.add(rec)
+        chunk: list[dict[str, Any]] = []
+        rows_iter = records if assume_deduped else _iter_deduped_registry_records(records)
+        for row in rows_iter:
+            chunk.append(_registry_record_insert_row(row))
+            if len(chunk) >= _REGISTRY_INSERT_BATCH_SIZE:
+                session.execute(insert(RegistryRecordModel), chunk)
+                chunk.clear()
+        if chunk:
+            session.execute(insert(RegistryRecordModel), chunk)
 
 
 def _safe_int(v: object) -> int | None:
@@ -122,10 +148,9 @@ def registry_row_dedupe_key(row: dict[str, Any]) -> tuple[object, ...]:
     )
 
 
-def _dedupe_registry_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Удаляет идентичные записи в рамках одной source_part перед сохранением в БД."""
+def _iter_deduped_registry_records(records: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    """Итератор dedupe: не создаёт второй большой список в памяти."""
     seen: set[tuple[object, ...]] = set()
-    out: list[dict[str, Any]] = []
     for row in records:
         if not isinstance(row, dict):
             continue
@@ -133,8 +158,7 @@ def _dedupe_registry_records(records: list[dict[str, Any]]) -> list[dict[str, An
         if key in seen:
             continue
         seen.add(key)
-        out.append(row)
-    return out
+        yield row
 
 
 _POSTAL_LOCALITY_RE = re.compile(
@@ -263,10 +287,12 @@ def _db_row_to_payload(row: RegistryRecordModel) -> dict[str, Any]:
     return out
 
 
-def load_cached_registry_records() -> list[dict[str, Any]]:
+def load_cached_registry_records(*, repair_addresses: bool = True) -> list[dict[str, Any]]:
     with session_scope() as session:
         db_rows = session.execute(select(RegistryRecordModel).order_by(RegistryRecordModel.pk.asc())).scalars().all()
     rows = [_db_row_to_payload(row) for row in db_rows]
+    if not repair_addresses:
+        return rows
     postal_to_city = _build_postal_city_map(rows)
     for row in rows:
         if not isinstance(row, dict):
@@ -287,9 +313,17 @@ def cache_meta() -> dict[str, Any] | None:
         if not meta:
             return None
         records_count = session.execute(select(func.count(RegistryRecordModel.pk))).scalar_one()
+        accepts_true_count = session.execute(
+            select(func.count(RegistryRecordModel.pk)).where(RegistryRecordModel.accepts_external_waste.is_(True))
+        ).scalar_one()
+        accepts_false_count = session.execute(
+            select(func.count(RegistryRecordModel.pk)).where(RegistryRecordModel.accepts_external_waste.is_(False))
+        ).scalar_one()
         return {
             "updated_at": meta.updated_at,
             "record_count": int(records_count),
+            "accepts_true_count": int(accepts_true_count),
+            "accepts_false_count": int(accepts_false_count),
             "sources": meta.sources or [],
             "source_signature": meta.source_signature,
         }
@@ -310,39 +344,199 @@ def load_geocode_cache() -> dict[str, dict[str, float]]:
         return {r.key: {"lat": float(r.lat), "lon": float(r.lon)} for r in rows}
 
 
-def save_geocode_cache(cache: dict[str, dict[str, float]]) -> None:
+def save_geocode_cache(cache: dict[str, dict[str, float]], keys: Iterable[str] | None = None) -> None:
+    def _iter_chunks(items: list[str], size: int):
+        for i in range(0, len(items), size):
+            yield items[i : i + size]
+
     with session_scope() as session:
-        for key, pair in cache.items():
+        selected_keys = list(keys) if keys is not None else list(cache.keys())
+        if not selected_keys:
+            return
+
+        payload: dict[str, dict[str, float]] = {}
+        for key in selected_keys:
+            pair = cache.get(key)
             if not isinstance(pair, dict):
                 continue
             lat = _safe_float(pair.get("lat"))
             lon = _safe_float(pair.get("lon"))
             if lat is None or lon is None:
                 continue
-            row = session.get(GeocodeCacheModel, key)
-            if row:
-                row.lat = lat
-                row.lon = lon
-                session.add(row)
-                continue
-            session.add(GeocodeCacheModel(key=key, lat=lat, lon=lon))
+            payload[key] = {"lat": lat, "lon": lon}
+        if not payload:
+            return
+
+        # Быстрый путь для PostgreSQL: upsert одной командой на чанк.
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            payload_keys = list(payload.keys())
+            for keys_chunk in _iter_chunks(payload_keys, _GEOCODE_UPSERT_BATCH_SIZE):
+                rows = [{"key": k, "lat": payload[k]["lat"], "lon": payload[k]["lon"]} for k in keys_chunk]
+                stmt = pg_insert(GeocodeCacheModel.__table__).values(rows)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[GeocodeCacheModel.__table__.c.key],
+                    set_={"lat": stmt.excluded.lat, "lon": stmt.excluded.lon},
+                )
+                session.execute(stmt)
+            return
+
+        payload_keys = list(payload.keys())
+        for keys_chunk in _iter_chunks(payload_keys, _GEOCODE_UPSERT_BATCH_SIZE):
+            existing_keys = set(
+                session.execute(select(GeocodeCacheModel.key).where(GeocodeCacheModel.key.in_(keys_chunk))).scalars().all()
+            )
+            to_insert: list[dict[str, Any]] = []
+            to_update: list[dict[str, Any]] = []
+            for key in keys_chunk:
+                pair = payload[key]
+                row = {"key": key, "lat": pair["lat"], "lon": pair["lon"]}
+                if key in existing_keys:
+                    to_update.append(row)
+                else:
+                    to_insert.append(row)
+
+            if to_insert:
+                session.bulk_insert_mappings(GeocodeCacheModel, to_insert)
+            if to_update:
+                session.bulk_update_mappings(GeocodeCacheModel, to_update)
+
+
+def _extract_pdf_text_pdfplumber(
+    data: bytes,
+    page_progress: Callable[[int, int], None] | None,
+) -> str:
+    """Прежний путь; на отдельных страницах pdfplumber может «висеть» без исключения."""
+    parts: list[str] = []
+    page_timeout_sec = max(0.0, float(settings.registry_pdfplumber_page_timeout_sec))
+    pymupdf_doc: Any = None
+    pymupdf_fallback_pages = 0
+    bio = io.BytesIO(data)
+    try:
+        with pdfplumber.open(bio) as pdf:
+            n = len(pdf.pages)
+            for i in range(n):
+                use_alarm = False
+                prev_handler: Any = None
+                if page_timeout_sec > 0 and hasattr(signal, "SIGALRM"):
+                    try:
+                        prev_handler = signal.getsignal(signal.SIGALRM)
+
+                        def _on_alarm(_signum: int, _frame: object) -> None:
+                            raise _PdfPlumberPageTimeout()
+
+                        signal.signal(signal.SIGALRM, _on_alarm)
+                        signal.setitimer(signal.ITIMER_REAL, page_timeout_sec)
+                        use_alarm = True
+                    except (AttributeError, ValueError):
+                        # Например, не-main thread / платформа без SIGALRM.
+                        use_alarm = False
+                try:
+                    t = pdf.pages[i].extract_text() or ""
+                except _PdfPlumberPageTimeout:
+                    logger.warning(
+                        "pdfplumber: таймаут страницы %s/%s (%.1fs), fallback на PyMuPDF",
+                        i + 1,
+                        n,
+                        page_timeout_sec,
+                    )
+                    t = ""
+                    try:
+                        if pymupdf_doc is None:
+                            import fitz
+
+                            pymupdf_doc = fitz.open(stream=data, filetype="pdf")
+                        t = pymupdf_doc.load_page(i).get_text() or ""
+                        if t.strip():
+                            pymupdf_fallback_pages += 1
+                    except Exception:
+                        logger.warning(
+                            "pymupdf fallback: пропуск страницы %s/%s (ошибка get_text)",
+                            i + 1,
+                            n,
+                        )
+                        t = ""
+                except Exception:
+                    logger.warning("pdfplumber: пропуск страницы %s/%s (ошибка extract_text)", i + 1, n)
+                    t = ""
+                finally:
+                    if use_alarm:
+                        try:
+                            signal.setitimer(signal.ITIMER_REAL, 0.0)
+                            signal.signal(signal.SIGALRM, prev_handler)
+                        except Exception:
+                            pass
+                if t.strip():
+                    parts.append(t)
+                if page_progress:
+                    page_progress(i + 1, n)
+    finally:
+        if pymupdf_doc is not None:
+            try:
+                pymupdf_doc.close()
+            except Exception:
+                pass
+    if pymupdf_fallback_pages > 0:
+        logger.info("pdfplumber fallback via PyMuPDF used on %s page(s)", pymupdf_fallback_pages)
+    return "\n".join(parts)
+
+
+def _extract_pdf_text_pymupdf(
+    data: bytes,
+    page_progress: Callable[[int, int], None] | None,
+) -> str:
+    import fitz
+
+    parts: list[str] = []
+    doc = fitz.open(stream=data, filetype="pdf")
+    try:
+        n = doc.page_count
+        for i in range(n):
+            try:
+                t = doc.load_page(i).get_text() or ""
+            except Exception:
+                logger.warning("pymupdf: пропуск страницы %s/%s (ошибка get_text)", i + 1, n)
+                t = ""
+            if t.strip():
+                parts.append(t)
+            if page_progress:
+                page_progress(i + 1, n)
+    finally:
+        doc.close()
+    return "\n".join(parts)
+
+
+def extract_pdf_text_pdfplumber_bytes(
+    data: bytes,
+    page_progress: Callable[[int, int], None] | None = None,
+) -> str:
+    """Извлечение текста pdfplumber (второй проход при импорте, если PyMuPDF не даёт записей)."""
+    return _extract_pdf_text_pdfplumber(data, page_progress)
 
 
 def extract_pdf_text_from_bytes(
     data: bytes,
     page_progress: Callable[[int, int], None] | None = None,
 ) -> str:
-    parts: list[str] = []
-    bio = io.BytesIO(data)
-    with pdfplumber.open(bio) as pdf:
-        n = len(pdf.pages)
-        for i in range(n):
-            t = pdf.pages[i].extract_text() or ""
-            if t.strip():
-                parts.append(t)
-            if page_progress:
-                page_progress(i + 1, n)
-    return "\n".join(parts)
+    """
+    Текст для импорта реестра. По умолчанию PyMuPDF: быстрее и обычно не залипает на страницах,
+    где pdfplumber зависает. Режим pdfplumber: REGISTRY_PDF_TEXT_BACKEND=pdfplumber.
+    """
+    backend = (settings.registry_pdf_text_backend or "pymupdf").strip().lower()
+    if backend == "pdfplumber":
+        return _extract_pdf_text_pdfplumber(data, page_progress)
+
+    try:
+        text = _extract_pdf_text_pymupdf(data, page_progress)
+    except Exception as e:
+        logger.warning("pymupdf: открытие/разбор PDF не удалось (%s), пробуем pdfplumber", e)
+        return _extract_pdf_text_pdfplumber(data, page_progress)
+
+    # Раньше при «мало текста» шли в pdfplumber — на части II это часто приводило к зависанию на странице.
+    # Повторяем pdfplumber только если PyMuPDF не вернул вообще ничего (пустой слой / сбой).
+    if not text.strip() and len(data) > 500:
+        logger.warning("pymupdf: пустой текст для PDF %s байт, пробуем pdfplumber", len(data))
+        return _extract_pdf_text_pdfplumber(data, page_progress)
+    return text
 
 
 def clear_user_registry_cache() -> None:

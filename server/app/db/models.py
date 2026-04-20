@@ -53,6 +53,8 @@ class RegistryRecordModel(Base):
 
     __table_args__ = (
         Index("ix_registry_records_record_id_waste_code", "record_id", "waste_code"),
+        Index("ix_registry_records_accepts_external_waste", "accepts_external_waste"),
+        Index("ix_registry_records_source_part_record_id", "source_part", "record_id"),
     )
 
 

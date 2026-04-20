@@ -109,6 +109,8 @@ export async function reverseGeocode(lat: number, lon: number): Promise<string |
 export type RegistryCacheMeta = {
   updated_at?: string;
   record_count: number;
+  accepts_true_count?: number;
+  accepts_false_count?: number;
   sources?: string[];
   source_signature?: string | null;
 };
@@ -174,6 +176,20 @@ export type RegistryImportStatus = {
   message?: string;
   error?: string | null;
   records_count?: number;
+  metrics?: {
+    done?: number;
+    total?: number;
+    rows_per_sec?: number;
+    eta_sec?: number | null;
+    nominatim_calls?: number;
+    nominatim_hit?: number;
+    nominatim_miss?: number;
+    cache_hit?: number;
+    approx_hit?: number;
+    addr_skipped?: number;
+    cached_miss_skip?: number;
+    budget_skip?: number;
+  };
 };
 
 export async function fetchRegistryImportStatus(jobId: string): Promise<RegistryImportStatus> {
