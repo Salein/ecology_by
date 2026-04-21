@@ -189,6 +189,15 @@ export type RegistryImportStatus = {
     addr_skipped?: number;
     cached_miss_skip?: number;
     budget_skip?: number;
+    checkpoints?: number;
+    db_snapshots?: number;
+    geocache_flushes?: number;
+    extract_sec?: number;
+    parse_sec?: number;
+    checkbox_sec?: number;
+    merge_sec?: number;
+    geocode_sec?: number;
+    total_sec?: number;
   };
 };
 

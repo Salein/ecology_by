@@ -10,8 +10,8 @@ from app.services.user_registry_cache import (
     cached_registry_signature,
     clear_user_registry_cache,
     import_payload_sha256_digests_sorted,
-    load_cached_registry_records,
     load_import_sources_detail,
+    registry_record_count,
     registry_files_fingerprint,
 )
 
@@ -55,7 +55,7 @@ async def registry_import(
             raise HTTPException(status_code=400, detail=f"Пустой файл: {f.filename!r}")
         payloads.append((f.filename, raw))
 
-    n_cached = len(load_cached_registry_records())
+    n_cached = registry_record_count()
     incoming_digests = import_payload_sha256_digests_sorted(payloads)
     detail = load_import_sources_detail()
     skip = False

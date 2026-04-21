@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import threading
 from typing import Any
@@ -22,10 +23,14 @@ from app.services.belarus_locality_centroids import approx_coords_from_by_text, 
 from app.services.distance import haversine_km
 from app.services.nominatim import forward_geocode_sync, forward_geocode_sync_relaxed
 from app.services.user_registry_cache import (
-    load_cached_registry_records,
-    load_geocode_cache,
+    load_geocode_cache_subset,
+    load_search_records,
+    load_search_records_prefilter,
+    load_search_records_text_prefilter,
     save_geocode_cache,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_addr_key(s: str) -> str:
@@ -70,6 +75,13 @@ def _coords_from_geocache(
         return float(hit["lat"]), float(hit["lon"])
     except (KeyError, TypeError, ValueError):
         return None, None
+
+
+def _address_key_from_row(row: dict[str, Any]) -> str | None:
+    addr = str(row.get("address") or "").strip()
+    if len(addr) < 4:
+        return None
+    return _normalize_addr_key(addr)
 
 
 def _norm_text(v: object) -> str:
@@ -148,18 +160,23 @@ def _resolve_coords_for_distance(
     return None, None, False
 
 
-def _geocode_pair_with_nominatim(q: str, delay_sec: float) -> tuple[float, float] | None:
+def _geocode_pair_with_nominatim(
+    q: str,
+    delay_sec: float,
+    *,
+    client: httpx.Client | None = None,
+) -> tuple[float, float] | None:
     """До двух запросов: строгий BY, затем без countrycodes. Пауза после каждого шага."""
     pair: tuple[float, float] | None = None
     try:
-        pair = forward_geocode_sync(q)
+        pair = forward_geocode_sync(q, client=client)
     except Exception:
         pair = None
     time.sleep(delay_sec)
     if pair:
         return pair
     try:
-        pair = forward_geocode_sync_relaxed(q)
+        pair = forward_geocode_sync_relaxed(q, client=client)
     except Exception:
         pair = None
     return pair
@@ -169,6 +186,8 @@ def _geocode_address_into_cache(
     row: dict[str, Any],
     geocache: dict[str, dict[str, float]],
     delay_sec: float,
+    *,
+    client: httpx.Client | None = None,
 ) -> tuple[float | None, float | None, bool, bool]:
     """
     Возвращает (lat, lon, nominatim_запрашивали, cache_updated).
@@ -187,7 +206,7 @@ def _geocode_address_into_cache(
 
     pair: tuple[float, float] | None = None
     for q in queries:
-        pair = _geocode_pair_with_nominatim(q, delay_sec)
+        pair = _geocode_pair_with_nominatim(q, delay_sec, client=client)
         if pair:
             break
 
@@ -219,22 +238,36 @@ def _start_async_geocache_warmup(filtered_rows: list[dict[str, Any]], delay_sec:
     def _worker() -> None:
         global _WARMUP_IN_PROGRESS
         try:
-            geocache = load_geocode_cache()
+            addr_keys = [k for k in (_address_key_from_row(r) for r in filtered_rows) if k]
+            geocache = load_geocode_cache_subset(addr_keys)
             geocache_dirty = False
+            updated_keys: set[str] = set()
             api_calls = 0
-            for row in filtered_rows:
-                if api_calls >= max_on_demand:
-                    break
-                la, lo = _resolve_coords_no_network(row, geocache)
-                if la is not None:
-                    continue
-                _la, _lo, attempted, updated = _geocode_address_into_cache(row, geocache, delay_sec)
-                if attempted:
-                    api_calls += 1
-                if updated:
-                    geocache_dirty = True
+            with httpx.Client(
+                timeout=settings.nominatim_timeout_sec,
+                headers={"User-Agent": settings.nominatim_user_agent},
+            ) as nominatim_client:
+                for row in filtered_rows:
+                    if api_calls >= max_on_demand:
+                        break
+                    la, lo = _resolve_coords_no_network(row, geocache)
+                    if la is not None:
+                        continue
+                    _la, _lo, attempted, updated = _geocode_address_into_cache(
+                        row,
+                        geocache,
+                        delay_sec,
+                        client=nominatim_client,
+                    )
+                    if attempted:
+                        api_calls += 1
+                    if updated:
+                        geocache_dirty = True
+                        key = _address_key_from_row(row)
+                        if key:
+                            updated_keys.add(key)
             if geocache_dirty:
-                save_geocode_cache(geocache)
+                save_geocode_cache(geocache, keys=updated_keys)
         finally:
             with _WARMUP_LOCK:
                 _WARMUP_IN_PROGRESS = False
@@ -243,7 +276,14 @@ def _start_async_geocache_warmup(filtered_rows: list[dict[str, Any]], delay_sec:
     t.start()
 
 
-def _road_distance_km(ulat: float, ulon: float, la: float, lo: float) -> tuple[float | None, str | None]:
+def _road_distance_km(
+    ulat: float,
+    ulon: float,
+    la: float,
+    lo: float,
+    *,
+    client: httpx.Client | None = None,
+) -> tuple[float | None, str | None]:
     base = settings.osrm_base_url
     if not base:
         return None, "OSRM не настроен"
@@ -252,9 +292,11 @@ def _road_distance_km(ulat: float, ulon: float, la: float, lo: float) -> tuple[f
         f"{ulon:.7f},{ulat:.7f};{lo:.7f},{la:.7f}"
         "?overview=false&alternatives=false&steps=false"
     )
+    own_client = client is None
+    if own_client:
+        client = httpx.Client(timeout=settings.osrm_timeout_sec)
     try:
-        with httpx.Client(timeout=settings.osrm_timeout_sec) as client:
-            r = client.get(url)
+        r = client.get(url)
         if r.status_code != 200:
             return None, f"OSRM HTTP {r.status_code}"
         data = r.json()
@@ -272,6 +314,12 @@ def _road_distance_km(ulat: float, ulon: float, la: float, lo: float) -> tuple[f
         return None, "Таймаут OSRM"
     except Exception:
         return None, "Ошибка запроса к OSRM"
+    finally:
+        if own_client and client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 def _distance_spread_km(distance_km: float, approx_only: bool, by_road: bool) -> tuple[float, str]:
@@ -290,16 +338,64 @@ def _distance_spread_km(distance_km: float, approx_only: bool, by_road: bool) ->
     return round(max(2.0, d * 0.2), 1), "По прямой; дорожная сеть и точный подъезд не учитываются."
 
 
+def _road_candidates_limit(total_scored: int, limit: int) -> int:
+    """
+    Адаптивно ограничивает число OSRM-кандидатов:
+    при очень больших выборках уменьшаем сетевую нагрузку, сохраняя качество топ-N.
+    """
+    if total_scored <= 0:
+        return 0
+    base = max(limit, settings.road_distance_candidates)
+    if total_scored <= base:
+        return total_scored
+    if total_scored >= 600:
+        tuned = max(limit, min(base, limit * 2 + 4))
+        return min(total_scored, tuned)
+    if total_scored >= 200:
+        tuned = max(limit, min(base, limit * 3 + 6))
+        return min(total_scored, tuned)
+    return min(total_scored, base)
+
+
 def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
-    rows = load_cached_registry_records()
+    t0 = time.perf_counter()
     q = body.query.strip().lower()
     code = (body.waste_code or "").strip()
+    location_selected = body.lat is not None and body.lon is not None
+    limit = max(1, settings.registry_closest_limit)
+    numeric_id_hint: int | None = None
+    if q.isdigit() and 1 <= len(q) <= 6:
+        try:
+            numeric_id_hint = int(q)
+        except ValueError:
+            numeric_id_hint = None
+
+    # Крупная оптимизация: в частых сценариях фильтруем в SQL до загрузки в память.
+    sql_text_filtered = False
+    if code or numeric_id_hint is not None:
+        rows = load_search_records_prefilter(
+            waste_code=code or None,
+            record_id=numeric_id_hint,
+            accepts_external_only=location_selected,
+        )
+    elif q:
+        rows = load_search_records_text_prefilter(
+            query=q,
+            accepts_external_only=location_selected,
+            limit=5000,
+        )
+        sql_text_filtered = True
+    elif location_selected:
+        rows = load_search_records(accepts_external_only=True)
+    else:
+        rows = load_search_records()
+    t_fetch_rows = time.perf_counter()
 
     filtered: list[dict[str, Any]] = []
     for row in rows:
         if code and str(row.get("waste_code") or "") != code:
             continue
-        if q:
+        if q and not sql_text_filtered:
             id_s = str(row.get("id", ""))
             wc = str(row.get("waste_code") or "")
             wtn = str(row.get("waste_type_name") or "")
@@ -313,31 +409,54 @@ def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
     if filtered:
         seen_keys: set[tuple[object, ...]] = set()
         uniq: list[dict[str, Any]] = []
+        max_unique = None if location_selected else limit
         for row in filtered:
             key = _search_row_key(row)
             if key in seen_keys:
                 continue
             seen_keys.add(key)
             uniq.append(row)
+            if max_unique is not None and len(uniq) >= max_unique:
+                break
         filtered = uniq
+    t_filtered = time.perf_counter()
 
-    limit = max(1, settings.registry_closest_limit)
     delay = settings.registry_geocode_delay_sec
     max_on_demand = max(0, settings.registry_search_geocode_max)
 
     if body.lat is None or body.lon is None:
         picked = filtered[:limit]
+        logger.debug(
+            "object_search no-location q=%r code=%r rows=%d filtered=%d picked=%d fetch_ms=%d filter_ms=%d total_ms=%d",
+            q,
+            code,
+            len(rows),
+            len(filtered),
+            len(picked),
+            int((t_fetch_rows - t0) * 1000),
+            int((t_filtered - t_fetch_rows) * 1000),
+            int((time.perf_counter() - t0) * 1000),
+        )
         return ObjectSearchResponse(items=[_row_to_out(r) for r in picked])
 
     # При выбранной точке показываем только объекты, принимающие отходы от других.
-    filtered = [r for r in filtered if _row_accepts_external_waste(r)]
+    if not (code or numeric_id_hint is not None or sql_text_filtered or not q):
+        filtered = [r for r in filtered if _row_accepts_external_waste(r)]
     if not filtered:
+        logger.debug(
+            "object_search location-empty q=%r code=%r rows=%d fetch_ms=%d filter_ms=%d total_ms=%d",
+            q,
+            code,
+            len(rows),
+            int((t_fetch_rows - t0) * 1000),
+            int((time.perf_counter() - t_fetch_rows) * 1000),
+            int((time.perf_counter() - t0) * 1000),
+        )
         return ObjectSearchResponse(items=[])
 
     ulat, ulon = float(body.lat), float(body.lon)
-    geocache = load_geocode_cache()
-    geocache_dirty = False
-
+    addr_keys = [k for k in (_address_key_from_row(r) for r in filtered) if k]
+    geocache = load_geocode_cache_subset(addr_keys)
     distance_pool = filtered
 
     scored: list[tuple[float, dict[str, Any], float, float, bool]] = []
@@ -350,6 +469,7 @@ def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
         scored.append((d, row, la, lo, approx))
 
     scored.sort(key=lambda x: x[0])
+    t_scored = time.perf_counter()
 
     # Не блокируем ответ сетью: on-demand геокодирование уходит в фон.
     _start_async_geocache_warmup(distance_pool, delay, max_on_demand)
@@ -360,27 +480,31 @@ def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
     road_error_by_row: dict[int, str] = {}
     note_by_row: dict[int, str] = {}
     road_mode = settings.distance_mode == "road"
+    osrm_checked = 0
     if road_mode and scored:
-        n_candidates = min(len(scored), max(limit, settings.road_distance_candidates))
+        n_candidates = _road_candidates_limit(len(scored), limit)
         ranked: list[tuple[float, dict[str, Any]]] = []
-        for air_d, row, la, lo, approx_only in scored[:n_candidates]:
-            road_d, road_err = _road_distance_km(ulat, ulon, la, lo)
-            used_d = road_d if road_d is not None else air_d
-            ranked.append((used_d, row))
-            k = id(row)
-            air_distance_by_row[k] = air_d
-            if road_d is None:
-                if road_err:
-                    road_error_by_row[k] = road_err
-                note_by_row[k] = _DISTANCE_NOTE_AIR_FALLBACK
-            else:
-                road_distance_by_row[k] = road_d
-            if approx_only and k not in note_by_row:
-                note_by_row[k] = _DISTANCE_NOTE_APPROX
+        with httpx.Client(timeout=settings.osrm_timeout_sec) as osrm_client:
+            for air_d, row, la, lo, approx_only in scored[:n_candidates]:
+                road_d, road_err = _road_distance_km(ulat, ulon, la, lo, client=osrm_client)
+                osrm_checked += 1
+                used_d = road_d if road_d is not None else air_d
+                ranked.append((used_d, row))
+                k = id(row)
+                air_distance_by_row[k] = air_d
+                if road_d is None:
+                    if road_err:
+                        road_error_by_row[k] = road_err
+                    note_by_row[k] = _DISTANCE_NOTE_AIR_FALLBACK
+                else:
+                    road_distance_by_row[k] = road_d
+                if approx_only and k not in note_by_row:
+                    note_by_row[k] = _DISTANCE_NOTE_APPROX
         ranked.sort(key=lambda x: x[0])
         picked = [r for _, r in ranked[:limit]]
     else:
         picked = [r for _, r, _, _, _ in scored[:limit]]
+    t_ranked = time.perf_counter()
 
     def _dist_row_key(r: dict[str, Any]) -> tuple[Any, Any]:
         return (r.get("id"), r.get("waste_code"))
@@ -394,9 +518,6 @@ def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
                 continue
             picked.append(row)
             picked_keys.add(_dist_row_key(row))
-
-    if geocache_dirty:
-        save_geocode_cache(geocache)
 
     items: list[WasteObjectOut] = []
     for row in picked:
@@ -432,9 +553,26 @@ def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
                 distance_spread_km=spread_km,
                 distance_spread_note=spread_note,
                 distance_note=note,
+                distance_is_approx=approx_only,
             )
         )
 
+    logger.debug(
+        "object_search location q=%r code=%r rows=%d filtered=%d scored=%d picked=%d osrm_checked=%d "
+        "fetch_ms=%d filter_ms=%d score_ms=%d rank_ms=%d total_ms=%d",
+        q,
+        code,
+        len(rows),
+        len(filtered),
+        len(scored),
+        len(items),
+        osrm_checked,
+        int((t_fetch_rows - t0) * 1000),
+        int((t_filtered - t_fetch_rows) * 1000),
+        int((t_scored - t_filtered) * 1000),
+        int((t_ranked - t_scored) * 1000),
+        int((time.perf_counter() - t0) * 1000),
+    )
     return ObjectSearchResponse(items=items)
 
 
@@ -446,6 +584,7 @@ def _row_to_out(
     distance_spread_km: float | None = None,
     distance_spread_note: str | None = None,
     distance_note: str | None = None,
+    distance_is_approx: bool = False,
 ) -> WasteObjectOut:
     addr_s = str(row.get("address") or "").strip()
     ph_s = str(row.get("phones") or "").strip()
@@ -466,7 +605,7 @@ def _row_to_out(
         distance_air_km=distance_air_km,
         distance_road_km=distance_road_km,
         distance_road_error=distance_road_error,
-        distance_is_approx=True,
+        distance_is_approx=distance_is_approx,
         distance_spread_km=distance_spread_km,
         distance_spread_note=distance_spread_note,
         distance_note=distance_note,

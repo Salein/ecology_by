@@ -238,6 +238,9 @@ def run_registry_import_job(
     merge_elapsed = 0.0
     geocache: dict[str, dict[str, float]] = {}
     geocache_dirty_keys: set[str] = set()
+    geocache_flushes = 0
+    db_snapshots = 0
+    checkpoint_events = 0
     recs: list[dict[str, Any]] | None = None
     names_for_save: list[str] | None = None
     import_detail: list[dict[str, Any]] | None = None
@@ -520,6 +523,9 @@ def run_registry_import_job(
                 "addr_skipped": geocode_stats["addr_skipped"],
                 "cached_miss_skip": geocode_stats["cached_miss_skip"],
                 "budget_skip": geocode_stats["nominatim_budget_skip"],
+                "checkpoints": checkpoint_events,
+                "db_snapshots": db_snapshots,
+                "geocache_flushes": geocache_flushes,
             }
 
         with httpx.Client(timeout=settings.nominatim_timeout_sec, headers=geo_headers) as nominatim_client:
@@ -621,6 +627,7 @@ def run_registry_import_job(
                 checkpoint_by_count = done % checkpoint_every == 0
                 checkpoint_by_time = checkpoint_max_sec > 0 and (now - last_checkpoint_at) >= checkpoint_max_sec
                 if checkpoint_by_count or checkpoint_by_time or done == n:
+                    checkpoint_events += 1
                     # Подстройка частоты тяжёлых чекпоинтов под текущую скорость rows/sec.
                     elapsed_import = max(0.001, now - geocode_t0)
                     rows_per_sec = done / elapsed_import
@@ -638,6 +645,7 @@ def run_registry_import_job(
                     if geocache_dirty_keys:
                         save_geocode_cache(geocache, geocache_dirty_keys)
                         geocache_dirty_keys.clear()
+                        geocache_flushes += 1
                         checkpoint_saved = True
                     # Полный частичный snapshot реестра — дорогая операция, выполняем реже.
                     db_progress_step = max(1, dynamic_db_checkpoint_every, min_db_checkpoint_rows)
@@ -655,6 +663,7 @@ def run_registry_import_job(
                         )
                         last_db_checkpoint_at = now
                         last_db_checkpoint_done = done
+                        db_snapshots += 1
                         checkpoint_saved = True
                     last_checkpoint_at = now
                     if checkpoint_saved:
@@ -669,6 +678,7 @@ def run_registry_import_job(
         if geocache_dirty_keys:
             save_geocode_cache(geocache, geocache_dirty_keys)
             geocache_dirty_keys.clear()
+            geocache_flushes += 1
         save_user_registry_cache(
             names_for_save,
             recs,
@@ -676,7 +686,9 @@ def run_registry_import_job(
             import_sources_detail=import_detail,
             assume_deduped=True,
         )
+        db_snapshots += 1
         geocode_elapsed = time.perf_counter() - geocode_t0
+        total_elapsed = time.perf_counter() - import_t0
         logger.info(
             "registry import geocode stats: total=%s preset=%s empty_addr=%s cache=%s approx=%s "
             "skip=%s cached_miss_skip=%s budget_skip=%s nominatim_calls=%s hit=%s miss=%s elapsed=%.2fs",
@@ -713,7 +725,17 @@ def run_registry_import_job(
             checkbox_elapsed,
             merge_elapsed,
             geocode_elapsed,
-            time.perf_counter() - import_t0,
+            total_elapsed,
+        )
+        logger.info(
+            "registry import summary rows=%s checkpoints=%s db_snapshots=%s geocache_flushes=%s "
+            "avg_rows_sec=%.2f parse_rows_sec=%.2f",
+            len(recs),
+            checkpoint_events,
+            db_snapshots,
+            geocache_flushes,
+            (len(recs) / max(0.001, geocode_elapsed)),
+            (len(parsed_recs) / max(0.001, parse_elapsed)),
         )
 
         _set_job(
@@ -723,7 +745,15 @@ def run_registry_import_job(
             message="Реестр сохранён в кэш",
             error=None,
             records_count=len(recs),
-            metrics=_metrics_snapshot(len(recs), time.perf_counter()),
+            metrics={
+                **_metrics_snapshot(len(recs), time.perf_counter()),
+                "extract_sec": round(extract_elapsed, 2),
+                "parse_sec": round(parse_elapsed, 2),
+                "checkbox_sec": round(checkbox_elapsed, 2),
+                "merge_sec": round(merge_elapsed, 2),
+                "geocode_sec": round(geocode_elapsed, 2),
+                "total_sec": round(total_elapsed, 2),
+            },
         )
     except Exception as e:
         # Даже при ошибке стараемся зафиксировать geocode_cache с уже найденными координатами.
@@ -731,6 +761,7 @@ def run_registry_import_job(
             if geocache_dirty_keys:
                 save_geocode_cache(geocache, geocache_dirty_keys)
                 geocache_dirty_keys.clear()
+                geocache_flushes += 1
         except Exception:
             pass
         # Сохраняем реестр как есть в памяти (после парсинга и частичного геокодирования).
@@ -749,6 +780,7 @@ def run_registry_import_job(
                     import_sources_detail=import_detail,
                     assume_deduped=True,
                 )
+                db_snapshots += 1
                 partial_note = f" Сохранён прогресс: {len(recs)} запис(ей) (координаты — по мере обработки)."
         except Exception:
             pass

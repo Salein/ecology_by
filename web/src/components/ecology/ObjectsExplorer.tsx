@@ -54,6 +54,11 @@ function formatEta(sec: number | null | undefined): string {
   return `${mm}м ${ss.toString().padStart(2, "0")}с`;
 }
 
+function formatStageSec(sec: number | null | undefined): string {
+  if (sec == null || !Number.isFinite(sec) || sec < 0) return EM_DASH;
+  return `${Math.round(sec * 10) / 10}с`;
+}
+
 function ResultsSkeleton() {
   return (
     <ul className="flex flex-col gap-4" aria-hidden>
@@ -408,6 +413,11 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
   const hasActiveQuery = query.trim().length > 0;
   const showSearchLoader = loading && !importBusy && (hasActiveQuery || queryInput.trim().length > 0);
   const showSkeleton = hasActiveQuery && (loading || importBusy);
+  const importStagesReady =
+    importMetrics != null &&
+    [importMetrics.extract_sec, importMetrics.parse_sec, importMetrics.geocode_sec, importMetrics.total_sec].some(
+      (v) => v != null && Number.isFinite(v),
+    );
 
   const locationChosen = lat != null && lon != null;
   const showDistanceSearchLoader = loading && locationChosen && !importBusy;
@@ -597,6 +607,35 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
               <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
                 Кэш/approx: <b>{(importMetrics.cache_hit ?? 0) + (importMetrics.approx_hit ?? 0)}</b>
               </span>
+              <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
+                Чекпоинты: <b>{importMetrics.checkpoints ?? 0}</b>
+              </span>
+              <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
+                DB snapshot: <b>{importMetrics.db_snapshots ?? 0}</b>
+              </span>
+              <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
+                Geocache flush: <b>{importMetrics.geocache_flushes ?? 0}</b>
+              </span>
+              {importStagesReady ? (
+                <>
+                  <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
+                    Стадии (Σ): <b>{formatStageSec(importMetrics.total_sec)}</b>
+                  </span>
+                  <span className="rounded-lg bg-emerald-100/70 px-2 py-1 sm:col-span-2">
+                    Извлечение/парсинг:{" "}
+                    <b>
+                      {formatStageSec(importMetrics.extract_sec)} / {formatStageSec(importMetrics.parse_sec)}
+                    </b>
+                  </span>
+                  <span className="rounded-lg bg-emerald-100/70 px-2 py-1 sm:col-span-2">
+                    Checkbox/merge/geocode:{" "}
+                    <b>
+                      {formatStageSec(importMetrics.checkbox_sec)} / {formatStageSec(importMetrics.merge_sec)} /{" "}
+                      {formatStageSec(importMetrics.geocode_sec)}
+                    </b>
+                  </span>
+                </>
+              ) : null}
             </div>
           ) : null}
           <p className="mt-2 text-xs text-emerald-900/50">
@@ -630,9 +669,6 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
                 value={queryInput}
                 onChange={(e) => {
                   setQueryInput(e.target.value);
-                  setLat(undefined);
-                  setLon(undefined);
-                  setAddressLabel("");
                 }}
                 onKeyDown={(e) => e.key === "Enter" && submitQuery()}
                 placeholder="Код объекта или вид отхода"

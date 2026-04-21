@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Iterator
 
 import pdfplumber
-from sqlalchemy import text
+from sqlalchemy import String, cast, or_, text
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -287,12 +287,7 @@ def _db_row_to_payload(row: RegistryRecordModel) -> dict[str, Any]:
     return out
 
 
-def load_cached_registry_records(*, repair_addresses: bool = True) -> list[dict[str, Any]]:
-    with session_scope() as session:
-        db_rows = session.execute(select(RegistryRecordModel).order_by(RegistryRecordModel.pk.asc())).scalars().all()
-    rows = [_db_row_to_payload(row) for row in db_rows]
-    if not repair_addresses:
-        return rows
+def _apply_address_repairs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     postal_to_city = _build_postal_city_map(rows)
     for row in rows:
         if not isinstance(row, dict):
@@ -305,6 +300,196 @@ def load_cached_registry_records(*, repair_addresses: bool = True) -> list[dict[
         repaired = repair_registry_address(addr, owner, obj)
         row["address"] = _repair_truncated_city_suffix(repaired, postal_to_city)
     return rows
+
+
+def _search_select_stmt():
+    return select(
+        RegistryRecordModel.pk,
+        RegistryRecordModel.source_part,
+        RegistryRecordModel.record_id,
+        RegistryRecordModel.owner,
+        RegistryRecordModel.object_name,
+        RegistryRecordModel.waste_code,
+        RegistryRecordModel.waste_type_name,
+        RegistryRecordModel.accepts_external_waste,
+        RegistryRecordModel.address,
+        RegistryRecordModel.phones,
+        RegistryRecordModel.lat,
+        RegistryRecordModel.lon,
+    )
+
+
+def _search_row_to_payload(row: Any) -> dict[str, Any]:
+    m = row._mapping if hasattr(row, "_mapping") else row
+    rid = m.get("record_id")
+    nid: int | None = None
+    if rid is not None and rid != "":
+        try:
+            nid = int(rid)
+        except (TypeError, ValueError):
+            nid = None
+    if nid is None:
+        nid = int(m.get("pk"))
+    return {
+        "id": nid,
+        "source_part": m.get("source_part"),
+        "owner": str(m.get("owner") or ""),
+        "object_name": str(m.get("object_name") or ""),
+        "waste_code": str(m.get("waste_code")) if m.get("waste_code") is not None else None,
+        "waste_type_name": str(m.get("waste_type_name")) if m.get("waste_type_name") is not None else None,
+        "accepts_external_waste": bool(m.get("accepts_external_waste", True)),
+        "address": str(m.get("address")) if m.get("address") is not None else None,
+        "phones": str(m.get("phones")) if m.get("phones") is not None else None,
+        "lat": _safe_float(m.get("lat")),
+        "lon": _safe_float(m.get("lon")),
+    }
+
+
+def load_cached_registry_records(*, repair_addresses: bool = True) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        db_rows = session.execute(select(RegistryRecordModel).order_by(RegistryRecordModel.pk.asc())).scalars().all()
+    rows = [_db_row_to_payload(row) for row in db_rows]
+    if not repair_addresses:
+        return rows
+    return _apply_address_repairs(rows)
+
+
+def load_search_records(
+    *,
+    accepts_external_only: bool = False,
+    repair_addresses: bool = True,
+) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        stmt = _search_select_stmt().order_by(RegistryRecordModel.pk.asc())
+        if accepts_external_only:
+            stmt = stmt.where(RegistryRecordModel.accepts_external_waste.is_(True))
+        db_rows = session.execute(stmt).all()
+    rows = [_search_row_to_payload(row) for row in db_rows]
+    if not repair_addresses:
+        return rows
+    return _apply_address_repairs(rows)
+
+
+def load_cached_registry_records_prefilter(
+    *,
+    waste_code: str | None = None,
+    record_id: int | None = None,
+    accepts_external_only: bool = False,
+    repair_addresses: bool = True,
+) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        stmt = select(RegistryRecordModel).order_by(RegistryRecordModel.pk.asc())
+        if waste_code:
+            stmt = stmt.where(RegistryRecordModel.waste_code == str(waste_code))
+        if record_id is not None:
+            stmt = stmt.where(RegistryRecordModel.record_id == int(record_id))
+        if accepts_external_only:
+            stmt = stmt.where(RegistryRecordModel.accepts_external_waste.is_(True))
+        db_rows = session.execute(stmt).scalars().all()
+    rows = [_db_row_to_payload(row) for row in db_rows]
+    if not repair_addresses:
+        return rows
+    return _apply_address_repairs(rows)
+
+
+def load_search_records_prefilter(
+    *,
+    waste_code: str | None = None,
+    record_id: int | None = None,
+    accepts_external_only: bool = False,
+    repair_addresses: bool = True,
+) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        stmt = _search_select_stmt().order_by(RegistryRecordModel.pk.asc())
+        if waste_code:
+            stmt = stmt.where(RegistryRecordModel.waste_code == str(waste_code))
+        if record_id is not None:
+            stmt = stmt.where(RegistryRecordModel.record_id == int(record_id))
+        if accepts_external_only:
+            stmt = stmt.where(RegistryRecordModel.accepts_external_waste.is_(True))
+        db_rows = session.execute(stmt).all()
+    rows = [_search_row_to_payload(row) for row in db_rows]
+    if not repair_addresses:
+        return rows
+    return _apply_address_repairs(rows)
+
+
+def load_cached_registry_records_text_prefilter(
+    *,
+    query: str,
+    waste_code: str | None = None,
+    accepts_external_only: bool = False,
+    limit: int = 5000,
+    repair_addresses: bool = True,
+) -> list[dict[str, Any]]:
+    q = (query or "").strip()
+    if not q:
+        return []
+    like_q = f"%{q}%"
+    with session_scope() as session:
+        stmt = select(RegistryRecordModel).order_by(RegistryRecordModel.pk.asc())
+        if waste_code:
+            stmt = stmt.where(RegistryRecordModel.waste_code == str(waste_code))
+        if accepts_external_only:
+            stmt = stmt.where(RegistryRecordModel.accepts_external_waste.is_(True))
+        stmt = stmt.where(
+            or_(
+                cast(RegistryRecordModel.record_id, String).ilike(like_q),
+                cast(RegistryRecordModel.waste_code, String).ilike(like_q),
+                cast(RegistryRecordModel.waste_type_name, String).ilike(like_q),
+                cast(RegistryRecordModel.owner, String).ilike(like_q),
+                cast(RegistryRecordModel.object_name, String).ilike(like_q),
+                cast(RegistryRecordModel.address, String).ilike(like_q),
+                cast(RegistryRecordModel.phones, String).ilike(like_q),
+            )
+        ).limit(max(1, int(limit)))
+        db_rows = session.execute(stmt).scalars().all()
+    rows = [_db_row_to_payload(row) for row in db_rows]
+    if not repair_addresses:
+        return rows
+    return _apply_address_repairs(rows)
+
+
+def load_search_records_text_prefilter(
+    *,
+    query: str,
+    waste_code: str | None = None,
+    accepts_external_only: bool = False,
+    limit: int = 5000,
+    repair_addresses: bool = True,
+) -> list[dict[str, Any]]:
+    q = (query or "").strip()
+    if not q:
+        return []
+    like_q = f"%{q}%"
+    with session_scope() as session:
+        stmt = _search_select_stmt().order_by(RegistryRecordModel.pk.asc())
+        if waste_code:
+            stmt = stmt.where(RegistryRecordModel.waste_code == str(waste_code))
+        if accepts_external_only:
+            stmt = stmt.where(RegistryRecordModel.accepts_external_waste.is_(True))
+        stmt = stmt.where(
+            or_(
+                cast(RegistryRecordModel.record_id, String).ilike(like_q),
+                cast(RegistryRecordModel.waste_code, String).ilike(like_q),
+                cast(RegistryRecordModel.waste_type_name, String).ilike(like_q),
+                cast(RegistryRecordModel.owner, String).ilike(like_q),
+                cast(RegistryRecordModel.object_name, String).ilike(like_q),
+                cast(RegistryRecordModel.address, String).ilike(like_q),
+                cast(RegistryRecordModel.phones, String).ilike(like_q),
+            )
+        ).limit(max(1, int(limit)))
+        db_rows = session.execute(stmt).all()
+    rows = [_search_row_to_payload(row) for row in db_rows]
+    if not repair_addresses:
+        return rows
+    return _apply_address_repairs(rows)
+
+
+def registry_record_count() -> int:
+    with session_scope() as session:
+        total = session.execute(select(func.count(RegistryRecordModel.pk))).scalar_one()
+    return int(total or 0)
 
 
 def cache_meta() -> dict[str, Any] | None:
@@ -342,6 +527,20 @@ def load_geocode_cache() -> dict[str, dict[str, float]]:
     with session_scope() as session:
         rows = session.execute(select(GeocodeCacheModel)).scalars().all()
         return {r.key: {"lat": float(r.lat), "lon": float(r.lon)} for r in rows}
+
+
+def load_geocode_cache_subset(keys: Iterable[str]) -> dict[str, dict[str, float]]:
+    uniq_keys = sorted({str(k or "").strip() for k in keys if str(k or "").strip()})
+    if not uniq_keys:
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    with session_scope() as session:
+        for i in range(0, len(uniq_keys), _GEOCODE_UPSERT_BATCH_SIZE):
+            chunk = uniq_keys[i : i + _GEOCODE_UPSERT_BATCH_SIZE]
+            rows = session.execute(select(GeocodeCacheModel).where(GeocodeCacheModel.key.in_(chunk))).scalars().all()
+            for r in rows:
+                out[r.key] = {"lat": float(r.lat), "lon": float(r.lon)}
+    return out
 
 
 def save_geocode_cache(cache: dict[str, dict[str, float]], keys: Iterable[str] | None = None) -> None:
