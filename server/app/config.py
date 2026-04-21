@@ -65,6 +65,13 @@ def _cookie_samesite() -> CookieSameSite:
     return "lax"
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class Settings:
     api_title: str = "Ecology Objects API"
@@ -118,6 +125,20 @@ class Settings:
     osrm_timeout_sec: float = float(os.getenv("OSRM_TIMEOUT_SEC", "2.5"))
     # Сколько кандидатов максимум проверять роутингом за один поиск
     road_distance_candidates: int = _int_env("ROAD_DISTANCE_CANDIDATES", 25)
+    # LLM fallback для особо проблемных PDF-сегментов (селективно, не основной парсер).
+    llm_fallback_enabled: bool = _bool_env("LLM_FALLBACK_ENABLED", False)
+    llm_fallback_shadow_mode: bool = _bool_env("LLM_FALLBACK_SHADOW_MODE", True)
+    llm_fallback_timeout_sec: float = _float_env("LLM_FALLBACK_TIMEOUT_SEC", 20.0)
+    llm_fallback_max_calls_per_import: int = _int_env("LLM_FALLBACK_MAX_CALLS_PER_IMPORT", 60)
+    llm_fallback_chunk_records: int = _int_env("LLM_FALLBACK_CHUNK_RECORDS", 2)
+    llm_fallback_max_retries: int = _int_env("LLM_FALLBACK_MAX_RETRIES", 2)
+    llm_fallback_openrouter_base_url: str = (
+        os.getenv("LLM_FALLBACK_OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
+    ).strip().rstrip("/")
+    llm_fallback_openrouter_model: str = (
+        os.getenv("LLM_FALLBACK_OPENROUTER_MODEL") or "google/gemini-2.0-flash-exp:free"
+    ).strip()
+    llm_fallback_openrouter_api_key: str = (os.getenv("OPENROUTER_API_KEY") or "").strip()
     # JWT (в продакшене задайте свой секрет)
     jwt_secret: str = os.getenv("JWT_SECRET", "ecology-dev-change-me-in-production")
     jwt_expire_hours: int = _int_env("JWT_EXPIRE_HOURS", 168)

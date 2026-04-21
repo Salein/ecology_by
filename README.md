@@ -104,6 +104,7 @@ PUBLIC_ORIGIN=http://localhost:8080
 - `HTTP_PORT` (если 8080 занят)
 - `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
 - `NOTIFY_WEBHOOK_URL` (для уведомлений quick tunnel)
+- `LLM_FALLBACK_*` и `OPENROUTER_API_KEY` (селективный fallback-парсинг сложных сегментов PDF)
 
 ## Импорт реестров PDF
 
@@ -113,6 +114,8 @@ PUBLIC_ORIGIN=http://localhost:8080
 
 Особенности:
 - используется потоковый парсинг и fallback-извлечение текста;
+- опционально: селективный LLM fallback (OpenRouter) только для проблемных сегментов с нулевым результатом парсера;
+  по умолчанию работает в shadow-mode (метрики есть, но LLM-строки в кэш не применяются);
 - геокодинг с кешом и фильтрацией нерелевантных адресов;
 - адреса/owner/object очищаются от шумовых артефактов;
 - данные сохраняются в PostgreSQL (`registry_records`, `geocode_cache`, `registry_cache_meta`).

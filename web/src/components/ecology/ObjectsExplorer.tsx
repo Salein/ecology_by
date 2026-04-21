@@ -616,6 +616,19 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
               <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
                 Geocache flush: <b>{importMetrics.geocache_flushes ?? 0}</b>
               </span>
+              {(importMetrics.llm_calls ?? 0) > 0 ? (
+                <>
+                  <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
+                    LLM calls: <b>{importMetrics.llm_calls ?? 0}</b>
+                  </span>
+                  <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
+                    LLM ok/fail: <b>{importMetrics.llm_success ?? 0}</b>/<b>{importMetrics.llm_fail ?? 0}</b>
+                  </span>
+                  <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
+                    LLM accepted/applied: <b>{importMetrics.llm_rows_accepted ?? 0}</b>/<b>{importMetrics.llm_rows_applied ?? 0}</b>
+                  </span>
+                </>
+              ) : null}
               {importStagesReady ? (
                 <>
                   <span className="rounded-lg bg-emerald-100/80 px-2 py-1">

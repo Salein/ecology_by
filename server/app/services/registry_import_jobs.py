@@ -14,6 +14,7 @@ import httpx
 from app.config import settings
 from app.services.belarus_locality_centroids import approx_coords_from_by_text
 from app.services.nominatim import forward_geocode_sync
+from app.services.llm_fallback import extract_records_with_llm_fallback, should_run_llm_fallback
 from app.services.registry_record_parser import iter_registry_plain_text
 from app.services.user_registry_cache import (
     extract_pdf_text_from_bytes,
@@ -241,6 +242,15 @@ def run_registry_import_job(
     geocache_flushes = 0
     db_snapshots = 0
     checkpoint_events = 0
+    llm_stats = {
+        "calls": 0,
+        "success": 0,
+        "fail": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "applied": 0,
+    }
+    llm_calls_remaining = max(0, int(settings.llm_fallback_max_calls_per_import))
     recs: list[dict[str, Any]] | None = None
     names_for_save: list[str] | None = None
     import_detail: list[dict[str, Any]] | None = None
@@ -284,9 +294,42 @@ def run_registry_import_job(
                 tlen,
                 part,
             )
+            before_parse = len(parsed_recs)
             t_parse0 = time.perf_counter()
             _append_unique_parsed(iter_registry_plain_text(text, part))
             parse_elapsed += time.perf_counter() - t_parse0
+            parsed_delta = len(parsed_recs) - before_parse
+            if should_run_llm_fallback(text, parsed_delta) and llm_calls_remaining > 0:
+                llm_rows, local_stats = extract_records_with_llm_fallback(
+                    text,
+                    source_part=part,
+                    max_calls=llm_calls_remaining,
+                )
+                llm_calls_remaining = max(0, llm_calls_remaining - int(local_stats.get("calls", 0)))
+                for k in llm_stats:
+                    if k in ("calls", "success", "fail", "accepted", "rejected"):
+                        llm_stats[k] += int(local_stats.get(k, 0))
+                if llm_rows:
+                    if settings.llm_fallback_shadow_mode:
+                        logger.info(
+                            "registry import %s: llm fallback shadow-mode active, rows not applied: %s",
+                            name,
+                            len(llm_rows),
+                        )
+                    else:
+                        before_apply = len(parsed_recs)
+                        _append_unique_parsed(llm_rows)
+                        llm_stats["applied"] += max(0, len(parsed_recs) - before_apply)
+                logger.info(
+                    "registry import %s: llm fallback calls=%s success=%s accepted=%s rejected=%s applied=%s total_rows_now=%s",
+                    name,
+                    local_stats.get("calls", 0),
+                    local_stats.get("success", 0),
+                    local_stats.get("accepted", 0),
+                    local_stats.get("rejected", 0),
+                    llm_stats["applied"],
+                    len(parsed_recs),
+                )
 
         _set_job(job_id, progress=28, message="Разбор записей реестра…")
         logger.info("registry import: parsed record count=%s", len(parsed_recs))
@@ -526,6 +569,12 @@ def run_registry_import_job(
                 "checkpoints": checkpoint_events,
                 "db_snapshots": db_snapshots,
                 "geocache_flushes": geocache_flushes,
+                "llm_calls": llm_stats["calls"],
+                "llm_success": llm_stats["success"],
+                "llm_fail": llm_stats["fail"],
+                "llm_rows_accepted": llm_stats["accepted"],
+                "llm_rows_rejected": llm_stats["rejected"],
+                "llm_rows_applied": llm_stats["applied"],
             }
 
         with httpx.Client(timeout=settings.nominatim_timeout_sec, headers=geo_headers) as nominatim_client:
@@ -729,13 +778,20 @@ def run_registry_import_job(
         )
         logger.info(
             "registry import summary rows=%s checkpoints=%s db_snapshots=%s geocache_flushes=%s "
-            "avg_rows_sec=%.2f parse_rows_sec=%.2f",
+            "avg_rows_sec=%.2f parse_rows_sec=%.2f llm_calls=%s llm_success=%s llm_fail=%s llm_rows_accepted=%s llm_rows_rejected=%s llm_rows_applied=%s shadow_mode=%s",
             len(recs),
             checkpoint_events,
             db_snapshots,
             geocache_flushes,
             (len(recs) / max(0.001, geocode_elapsed)),
             (len(parsed_recs) / max(0.001, parse_elapsed)),
+            llm_stats["calls"],
+            llm_stats["success"],
+            llm_stats["fail"],
+            llm_stats["accepted"],
+            llm_stats["rejected"],
+            llm_stats["applied"],
+            settings.llm_fallback_shadow_mode,
         )
 
         _set_job(

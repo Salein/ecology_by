@@ -192,6 +192,12 @@ export type RegistryImportStatus = {
     checkpoints?: number;
     db_snapshots?: number;
     geocache_flushes?: number;
+    llm_calls?: number;
+    llm_success?: number;
+    llm_fail?: number;
+    llm_rows_accepted?: number;
+    llm_rows_rejected?: number;
+    llm_rows_applied?: number;
     extract_sec?: number;
     parse_sec?: number;
     checkbox_sec?: number;
