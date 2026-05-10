@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from app.deps import attach_session_cookie, clear_session_cookie, create_access_token, get_current_user
+
+from app.core.security import attach_session_cookie, clear_session_cookie, create_access_token, get_current_user
 from app.schemas import AuthSessionResponse, LoginRequest, RegisterRequest, UserOut
-from app.services.auth_users import (
+from app.domains.auth.service import (
     UserRecord,
     get_user_by_email,
     get_user_by_id,

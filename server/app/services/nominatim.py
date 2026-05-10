@@ -1,6 +1,6 @@
 import httpx
 
-from app.config import settings
+from app.core.config import settings
 
 
 def _nominatim_search_url() -> str:

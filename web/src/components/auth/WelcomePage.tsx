@@ -3,6 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { Button } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
 
 function clearFieldValidity(e: React.ChangeEvent<HTMLInputElement>) {
   e.currentTarget.setCustomValidity("");
@@ -91,8 +93,12 @@ export function WelcomePage() {
   return (
     <div className="mx-auto flex w-full max-w-lg flex-col gap-8 px-4 py-16 sm:px-6">
       <div className="text-center">
-        <h2 className="text-3xl font-semibold tracking-tight text-emerald-950">Вход в систему</h2>
-        <p className="mt-2 text-sm text-emerald-900/60">Войдите или зарегистрируйтесь для доступа к системе.</p>
+        <h2 className="text-3xl font-semibold tracking-tight text-emerald-950">
+          Вход в систему
+        </h2>
+        <p className="mt-2 text-sm leading-relaxed text-emerald-900/60">
+          Войдите или зарегистрируйтесь для доступа к системе.
+        </p>
       </div>
 
       <div className="flex rounded-2xl border border-emerald-100/90 bg-emerald-50/40 p-1 shadow-sm">
@@ -126,11 +132,8 @@ export function WelcomePage() {
         </button>
       </div>
 
-      <form
-        noValidate
-        onSubmit={(e) => void onSubmit(e)}
-        className="flex flex-col gap-4 rounded-2xl border border-emerald-100/90 bg-white/95 p-6 shadow-sm shadow-emerald-900/5"
-      >
+      <Card padding="lg">
+        <form noValidate onSubmit={(e) => void onSubmit(e)} className="flex flex-col gap-4">
         {mode === "register" ? (
           <label className="flex flex-col gap-1.5 text-sm">
             <span className="font-medium text-emerald-950">Имя</span>
@@ -182,15 +185,14 @@ export function WelcomePage() {
             minLength={mode === "register" ? 8 : undefined}
           />
         </label>
-        {error ? <p className="text-sm text-red-700">{error}</p> : null}
-        <button
-          type="submit"
-          disabled={busy}
-          className="mt-2 rounded-2xl bg-emerald-700 py-3.5 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-800 disabled:opacity-60"
-        >
+        {error ? (
+          <p className="text-sm text-red-700">{error}</p>
+        ) : null}
+        <Button type="submit" variant="primary" size="lg" disabled={busy} className="mt-2 w-full">
           {busy ? "Подождите…" : mode === "login" ? "Войти" : "Зарегистрироваться"}
-        </button>
-      </form>
+        </Button>
+        </form>
+      </Card>
     </div>
   );
 }

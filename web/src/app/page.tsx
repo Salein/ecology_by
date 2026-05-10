@@ -6,11 +6,11 @@ export default function Home() {
     <div className="relative isolate min-h-full flex-1 overflow-x-hidden">
       <LeafCornerAccent />
       <section className="relative z-10 mx-auto w-full max-w-5xl px-4 pt-10 sm:px-6 sm:pt-14">
-        <div className="rounded-3xl border border-emerald-100/90 bg-white/95 p-6 shadow-sm shadow-emerald-900/5 sm:p-8">
+        <div className="rounded-3xl border border-emerald-200/50 bg-white p-6 shadow-md shadow-emerald-950/[0.06] sm:p-8">
           <h1 className="text-3xl font-semibold tracking-tight text-emerald-950 sm:text-4xl">
             Экология Беларуси: поиск объектов обращения с отходами
           </h1>
-          <p className="mt-3 max-w-3xl text-base leading-relaxed text-emerald-900/70">
+          <p className="mt-3 max-w-3xl text-base leading-relaxed text-emerald-900/65">
             Сервис помогает находить объекты по виду отходов, адресу и расстоянию до выбранной точки на карте.
             Данные формируются из официальных реестров PDF, а геолокация объектов уточняется и кэшируется для
             ускорения поиска.

@@ -1,25 +1,35 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
+  /* Тёплый off-white с лёгкым зелёным тоном — меньше контраста с белыми карточками, чем чистый #fff */
+  --background: #f3f7f4;
   --foreground: #14532d;
+  --surface: #ffffff;
+  --ring-offset: #f3f7f4;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
 html {
-  background: #ffffff;
+  background: var(--background);
+  scroll-behavior: smooth;
 }
 
 body {
   min-height: 100%;
-  background: #ffffff;
+  background: transparent;
   color: var(--foreground);
+}
+
+::selection {
+  background-color: rgb(167 243 208 / 0.55);
+  color: rgb(6 78 59);
 }
 
 .leaflet-container {

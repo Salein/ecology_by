@@ -53,6 +53,14 @@ describe("formatObjectNameDisplay", () => {
     expect(formatObjectNameDisplay(value)).toBe("Стационарный дробильно-сортировочный комплекс");
   });
 
+  it("does not truncate long plain object titles", () => {
+    const value =
+      "Очень длинное наименование объекта " +
+      "abcdefghijklmnopqrstuvwxyz ".repeat(12) +
+      "окончание строки без искусственного обрезания";
+    expect(formatObjectNameDisplay(value)).toBe(value);
+  });
+
   it("returns informative placeholder for dash-like value", () => {
     expect(formatObjectNameDisplay("—")).toBe("Не указан в реестре");
   });

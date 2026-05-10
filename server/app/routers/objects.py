@@ -1,11 +1,11 @@
 import anyio
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
-from app.deps import get_current_user
+from app.core.security import get_current_user
 from app.schemas import ObjectSearchRequest, ObjectSearchResponse
-from app.services.auth_users import UserRecord
-from app.services.object_search import run_object_search
+from app.domains.auth.service import UserRecord
+from app.domains.search.service import run_object_search, suggest_waste_variants
 
 router = APIRouter(prefix="/objects", tags=["objects"])
 
@@ -34,3 +34,13 @@ async def search_objects(
         body.query,
         body.waste_code,
     )
+
+
+@router.get("/waste-suggest")
+async def waste_suggest(
+    q: str = Query("", min_length=0, max_length=120),
+    limit: int = Query(12, ge=1, le=30),
+    _: UserRecord = Depends(get_current_user),
+):
+    items = await anyio.to_thread.run_sync(suggest_waste_variants, q, limit)
+    return {"items": items}

@@ -1,0 +1,3 @@
+from app.services.registry_import.pdf_part import _extract_accepts_external_by_object_id as extract_accepts_external_by_object_id
+
+__all__ = ["extract_accepts_external_by_object_id"]

@@ -2,21 +2,11 @@
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
-import {
-  fetchRegistryCacheMetaResult,
-  fetchRegistryImportStatus,
-  postRegistryImportWithUploadProgress,
-  reverseGeocode,
-  searchObjects,
-  type RegistryCacheMeta,
-  type RegistryImportStatus,
-  type WasteObjectRow,
-} from "@/lib/api";
-import {
-  formatWasteTypeDisplay,
-} from "./formatters";
+import { fetchRegistryCacheMetaResult, type RegistryCacheMeta } from "@/lib/api";
+import { Card } from "@/components/ui/Card";
+import { Button, linkAsButtonSecondaryClass } from "@/components/ui/Button";
 import {
   AddressCell,
   AirDistanceCell,
@@ -26,14 +16,15 @@ import {
   PhonesCell,
   RoadDistanceCell,
 } from "./resultCells";
-import { WasteTypeField } from "./wasteTypeField";
+import { useRegistryImport } from "./hooks/useRegistryImport";
+import { useSearch } from "./hooks/useSearch";
+import { useWasteSuggest } from "./hooks/useWasteSuggest";
+import { RegistryImportPanel } from "./RegistryImportPanel";
 
 const LocationMapModal = dynamic(
   () => import("./LocationMapModal").then((m) => m.LocationMapModal),
   { ssr: false },
 );
-
-const EM_DASH = "—";
 
 const LOCATION_PLACEHOLDER = "Выберите местоположение объекта";
 
@@ -45,27 +36,13 @@ const RESULT_GRID =
 const DISTANCE_NOT_CALCULATED_NOTE = "Расстояние не удалось рассчитать";
 const ROAD_DISTANCE_NOT_CALCULATED_NOTE = "По дорогам: расчёт не выполнен";
 
-function formatEta(sec: number | null | undefined): string {
-  if (sec == null || !Number.isFinite(sec) || sec < 0) return EM_DASH;
-  const s = Math.max(0, Math.round(sec));
-  const mm = Math.floor(s / 60);
-  const ss = s % 60;
-  if (mm <= 0) return `${ss} c`;
-  return `${mm}м ${ss.toString().padStart(2, "0")}с`;
-}
-
-function formatStageSec(sec: number | null | undefined): string {
-  if (sec == null || !Number.isFinite(sec) || sec < 0) return EM_DASH;
-  return `${Math.round(sec * 10) / 10}с`;
-}
-
 function ResultsSkeleton() {
   return (
     <ul className="flex flex-col gap-4" aria-hidden>
       {Array.from({ length: 7 }).map((_, i) => (
         <li
           key={i}
-          className={`grid animate-pulse grid-cols-1 gap-3 rounded-2xl border border-emerald-100/90 bg-white/90 p-4 shadow-sm shadow-emerald-900/5 ${RESULT_GRID} sm:items-start sm:gap-x-5 sm:gap-y-3`}
+          className={`grid animate-pulse grid-cols-1 gap-3 rounded-2xl border border-emerald-100/90 bg-white/90 p-4 shadow-sm shadow-emerald-900/5 ${RESULT_GRID} sm:items-stretch sm:gap-x-5 sm:gap-y-3`}
         >
           <div className="h-5 w-10 rounded bg-emerald-100 sm:pt-0.5" />
           <div className="h-4 w-full max-w-full rounded bg-emerald-100 sm:pt-0.5" />
@@ -194,238 +171,130 @@ export type ObjectsExplorerProps = {
 
 export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
   const { user, logout } = useAuth();
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [queryInput, setQueryInput] = useState("");
-  const [query, setQuery] = useState("");
-  const [lat, setLat] = useState<number | undefined>(undefined);
-  const [lon, setLon] = useState<number | undefined>(undefined);
-  const [addressLabel, setAddressLabel] = useState("");
-  const [mapOpen, setMapOpen] = useState(false);
-  const [rows, setRows] = useState<WasteObjectRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
   const [cacheMeta, setCacheMeta] = useState<RegistryCacheMeta | null>(null);
   const [cacheMetaReady, setCacheMetaReady] = useState(false);
   const [registryMetaError, setRegistryMetaError] = useState<string | null>(null);
-  const [importBusy, setImportBusy] = useState(false);
-  const [importProgress, setImportProgress] = useState(0);
-  const [importMessage, setImportMessage] = useState("");
-  const [importError, setImportError] = useState<string | null>(null);
-  const [importMetrics, setImportMetrics] = useState<RegistryImportStatus["metrics"] | null>(null);
+  const [serverRegistryImportInProgress, setServerRegistryImportInProgress] = useState(false);
 
-  const refreshAddress = useCallback(async (la: number, lo: number) => {
-    setAddressLabel(`${la.toFixed(4)}, ${lo.toFixed(4)}`);
-    try {
-      const name = await reverseGeocode(la, lo);
-      if (name) setAddressLabel(name);
-    } catch {
-      /* координаты уже в подписи */
-    }
-  }, []);
-
-  const runSearch = useCallback(async () => {
-    const q = query.trim();
-    if (!q) {
-      setRows([]);
-      setError(null);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const items = await searchObjects({
-        query: q,
-        lat,
-        lon,
-      });
-      setRows(items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Ошибка запроса");
-      setRows([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [query, lat, lon]);
-
-  const submitQuery = useCallback(() => {
-    const next = queryInput.trim();
-    setQuery(next);
-    if (next) {
-      setLoading(true);
-      setError(null);
-    }
-  }, [queryInput]);
-
-  const wasteTypeDisplay = useMemo(() => {
-    const first = rows[0];
-    if (!first) {
-      return EM_DASH;
-    }
-    return formatWasteTypeDisplay(first.waste_type_name);
-  }, [rows]);
+  const onCacheMetaUpdate = useCallback(
+    (meta: RegistryCacheMeta | null, ready: boolean, err: string | null, serverImport?: boolean) => {
+      setCacheMetaReady(ready);
+      if (err != null) {
+        setCacheMeta(null);
+        setServerRegistryImportInProgress(false);
+        setRegistryMetaError(
+          err === "таймаут"
+            ? "сервер не ответил вовремя"
+            : err === "сеть или CORS"
+              ? "нет связи с API (сеть или CORS)"
+              : `ответ сервера: ${err}`,
+        );
+        return;
+      }
+      setCacheMeta(meta);
+      setRegistryMetaError(null);
+      if (serverImport !== undefined) {
+        setServerRegistryImportInProgress(serverImport);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     void fetchRegistryCacheMetaResult().then((res) => {
-      setCacheMetaReady(true);
       if (res.ok) {
-        setCacheMeta(res.cache);
-        setRegistryMetaError(null);
+        onCacheMetaUpdate(res.cache, true, null, res.registry_import_in_progress);
       } else {
-        setCacheMeta(null);
-        setRegistryMetaError(
-          res.reason === "таймаут"
-            ? "сервер не ответил вовремя"
-            : res.reason === "сеть или CORS"
-              ? "нет связи с API (сеть или CORS)"
-              : `ответ сервера: ${res.reason}`,
-        );
+        onCacheMetaUpdate(null, true, res.reason);
       }
     });
-  }, []);
+  }, [onCacheMetaUpdate]);
 
   useEffect(() => {
-    void runSearch();
-  }, [runSearch]);
-
-  useEffect(() => {
-    if (lat != null && lon != null) void refreshAddress(lat, lon);
-    else setAddressLabel("");
-  }, [lat, lon, refreshAddress]);
-
-  const handleRegistryFiles = useCallback(
-    async (list: FileList | null) => {
-      if (!list?.length) return;
-      const files = Array.from(list).filter((f) => f.name.toLowerCase().endsWith(".pdf"));
-      if (!files.length) {
-        setImportError("Выберите файлы в формате PDF.");
-        return;
-      }
-      setImportError(null);
-      setImportBusy(true);
-      setImportProgress(0);
-      setImportMessage("Подготовка загрузки…");
-      try {
-        const total = files.length;
-        for (let i = 0; i < total; i += 1) {
-          const file = files[i];
-          const base = Math.round((i / total) * 100);
-          const span = Math.max(1, Math.round(100 / total));
-          const progressForFile = (pctInFile: number) =>
-            Math.min(100, Math.round(base + (pctInFile / 100) * span));
-          const prefix = total > 1 ? `Файл ${i + 1}/${total}: ${file.name}. ` : "";
-
-          setImportMessage(`${prefix}Отправка на сервер…`);
-          setImportMetrics(null);
-          const post = await postRegistryImportWithUploadProgress([file], (up) => {
-            setImportProgress(progressForFile(Math.min(35, Math.round(up * 0.35))));
-            setImportMessage(`${prefix}Отправка на сервер…`);
-          });
-
-          if (post.skipped) {
-            if (post.cache) {
-              setCacheMeta(post.cache);
-              setRegistryMetaError(null);
-              setCacheMetaReady(true);
-            } else {
-              const res = await fetchRegistryCacheMetaResult();
-              setCacheMetaReady(true);
-              if (res.ok) {
-                setCacheMeta(res.cache);
-                setRegistryMetaError(null);
-              } else {
-                setCacheMeta(null);
-                setRegistryMetaError(res.reason);
-              }
-            }
-            setImportMessage(prefix + (post.message || "Данные совпадают с кэшем — импорт пропущен."));
-            setImportProgress(Math.min(100, base + span));
-          } else {
-            let transientStatusFails = 0;
-            for (;;) {
-              let st;
-              try {
-                st = await fetchRegistryImportStatus(post.job_id);
-                transientStatusFails = 0;
-              } catch (statusErr) {
-                const msg =
-                  statusErr instanceof Error && statusErr.message
-                    ? statusErr.message
-                    : String(statusErr || "");
-                const transient =
-                  /(?:\b502\b|\b503\b|\b504\b|timeout|timed out|fetch|network|сеть)/i.test(msg);
-                if (transient && transientStatusFails < 25) {
-                  transientStatusFails += 1;
-                  setImportMessage(prefix + "Связь с API прервалась, ждём восстановление…");
-                  await new Promise((r) => setTimeout(r, 700));
-                  continue;
-                }
-                throw statusErr;
-              }
-
-              setImportMessage(prefix + (st.message || st.status));
-              setImportMetrics(st.metrics ?? null);
-              setImportProgress(progressForFile(Math.min(100, Math.round(35 + st.progress * 0.65))));
-              if (st.status === "done") break;
-              if (st.status === "error") {
-                const detail =
-                  (st.message && st.message.trim()) ||
-                  st.error ||
-                  "Ошибка обработки реестра";
-                throw new Error(detail);
-              }
-              await new Promise((r) => setTimeout(r, 450));
-            }
-
-            const res = await fetchRegistryCacheMetaResult();
-            setCacheMetaReady(true);
-            if (res.ok) {
-              setCacheMeta(res.cache);
-              setRegistryMetaError(null);
-            } else {
-              setCacheMeta(null);
-              setRegistryMetaError(res.reason);
-            }
-            setImportMessage(total > 1 ? `Файл ${i + 1}/${total} обработан.` : "Готово. Обновляем список…");
-            setImportProgress(Math.min(100, base + span));
-          }
+    if (canImportRegistry || !serverRegistryImportInProgress) return;
+    const id = window.setInterval(() => {
+      void fetchRegistryCacheMetaResult().then((res) => {
+        if (res.ok) {
+          onCacheMetaUpdate(res.cache, true, null, res.registry_import_in_progress);
         }
-        setImportMessage("Готово. Обновляем список…");
-        setImportProgress(100);
-        await runSearch();
-      } catch (e) {
-        const msg =
-          e instanceof Error && e.message
-            ? e.message
-            : "Ошибка загрузки";
-        setImportError(msg);
-      } finally {
-        setImportBusy(false);
-        setImportProgress(0);
-        setImportMessage("");
-        setImportMetrics(null);
-        if (fileRef.current) fileRef.current.value = "";
-      }
-    },
-    [runSearch],
-  );
+      });
+    }, 10_000);
+    return () => window.clearInterval(id);
+  }, [canImportRegistry, serverRegistryImportInProgress, onCacheMetaUpdate]);
 
-  const hasActiveQuery = query.trim().length > 0;
-  const showSearchLoader = loading && !importBusy && (hasActiveQuery || queryInput.trim().length > 0);
-  const showSkeleton = hasActiveQuery && (loading || importBusy);
-  const importStagesReady =
-    importMetrics != null &&
-    [importMetrics.extract_sec, importMetrics.parse_sec, importMetrics.geocode_sec, importMetrics.total_sec].some(
-      (v) => v != null && Number.isFinite(v),
-    );
+  const search = useSearch(importBusy);
 
-  const locationChosen = lat != null && lon != null;
-  const showDistanceSearchLoader = loading && locationChosen && !importBusy;
+  const reg = useRegistryImport({
+    importBusy,
+    setImportBusy,
+    abortSearch: search.abortSearch,
+    runSearch: search.runSearch,
+    setLoading: search.setLoading,
+    onCacheMetaUpdate,
+  });
+
+  const waste = useWasteSuggest({
+    queryInput: search.queryInput,
+    setQueryInput: search.setQueryInput,
+    importBusy,
+    commitQuery: search.commitQuery,
+  });
+
+  const {
+    queryInput,
+    setQueryInput,
+    query,
+    lat,
+    lon,
+    setLat,
+    setLon,
+    addressLabel,
+    mapOpen,
+    setMapOpen,
+    rows,
+    loading,
+    error,
+    submitQuery,
+    hasActiveQuery,
+    showSearchLoader,
+    showSkeleton,
+    showDistanceSearchLoader,
+    locationChosen,
+  } = search;
+
+  const {
+    wasteSuggest,
+    showWasteSuggest,
+    setShowWasteSuggest,
+    wasteSuggestActive,
+    setWasteSuggestActive,
+    suggestionLabel,
+    applySuggestion,
+    renderHighlightedLabel,
+  } = waste;
+
+  const {
+    fileRef,
+    importProgress,
+    importMessage,
+    importError,
+    importMetrics,
+    uploadEtaSec,
+    uploadSpeedMbps,
+    uploadPhase,
+    importElapsedSec,
+    totalEtaSec,
+    importTimeline,
+    handleRegistryFiles,
+  } = reg;
+
   const locationDisplay = locationChosen
     ? addressLabel.trim() || `${lat!.toFixed(4)}, ${lon!.toFixed(4)}`
     : LOCATION_PLACEHOLDER;
 
   const registryLoaded = Boolean(cacheMeta && cacheMeta.record_count > 0);
+  const showAdminImportNotice = !canImportRegistry && serverRegistryImportInProgress;
   const registryUploadedAt = useMemo(() => {
     if (!cacheMeta?.updated_at) return null;
     try {
@@ -442,44 +311,45 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
   }, [cacheMeta?.updated_at]);
 
   return (
-    <div className="relative z-10 mx-auto flex w-full max-w-[min(100%,96rem)] flex-col gap-8 py-10 pr-4 pl-8 sm:pr-6 sm:pl-12 md:pl-14">
-      <div className="relative z-10 flex flex-wrap items-center justify-end gap-2 pl-10 text-sm sm:pl-16 md:pl-24 lg:pl-28">
-        <span className="mr-auto min-w-0 text-emerald-900/70">
+    <div className="relative z-10 mx-auto flex w-full max-w-[min(100%,96rem)] flex-col gap-8 px-5 py-8 sm:px-8 sm:py-10 md:px-10">
+      <Card
+        padding="none"
+        className="relative z-10 ms-auto flex w-fit max-w-full min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-2 px-4 py-3 text-sm shadow-sm"
+      >
+        <span className="min-w-0 shrink text-right text-emerald-900/75">
           {user?.name ? (
             <>
-              <span className="font-medium text-emerald-950">{user.name}</span>
-              <span className="text-emerald-800/60"> · {user.email}</span>
+              <span className="font-semibold text-emerald-950">{user.name}</span>
+              <span className="font-normal text-emerald-800/55"> · {user.email}</span>
             </>
           ) : null}
         </span>
         {user?.role === "admin" ? (
-          <Link
-            href="/admin"
-            className="rounded-xl border border-emerald-200/90 bg-white px-3 py-2 font-medium text-emerald-900 shadow-sm transition hover:bg-emerald-50/90"
-          >
+          <Link href="/admin" className={linkAsButtonSecondaryClass}>
             Админ-панель
           </Link>
         ) : null}
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="md"
           onClick={() => {
             void (async () => {
               await logout();
               window.location.href = "/";
             })();
           }}
-          className="rounded-xl border border-stone-200 bg-white px-3 py-2 font-medium text-stone-700 transition hover:bg-stone-50"
         >
           Выйти
-        </button>
-      </div>
+        </Button>
+      </Card>
 
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight text-emerald-950">
+      <header className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+        <div className="max-w-3xl space-y-3">
+          <h1 className="text-2xl font-semibold tracking-tight text-stone-900 sm:text-3xl">
             Поиск объектов обращения с отходами
           </h1>
-          <p className="text-sm text-emerald-900/55">
+          <p className="text-sm leading-relaxed text-stone-700 sm:text-[15px]">
             {canImportRegistry
               ? "Загрузите PDF реестров (часть I и II) — данные кэшируются на сервере. "
               : "Данные реестра на сервере. "}
@@ -487,11 +357,16 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
             дорогам (OSRM, с fallback при недоступности роутинга). Обе дистанции оценочные; рядом выводится примерный
             разброс (± км). Карта — OpenStreetMap.
           </p>
-          <div className="flex flex-col gap-1 border-l-2 border-emerald-200/80 py-0.5 pl-3 text-xs sm:text-[13px]">
-            <p className="text-emerald-900/80">
-              <span className="font-semibold text-emerald-950">Реестр в системе:</span>{" "}
+          <div className="flex flex-col gap-2 rounded-2xl border border-emerald-100/90 bg-white/70 p-4 text-xs leading-relaxed shadow-sm shadow-emerald-950/[0.03] sm:text-[13px]">
+            {showAdminImportNotice ? (
+              <p className="rounded-xl border border-amber-200/90 bg-amber-50/95 px-3 py-2 text-[13px] font-medium text-amber-950 sm:text-sm">
+                Администратор обновляет реестр — данные на сервере могут меняться. Подождите завершения импорта.
+              </p>
+            ) : null}
+            <p className="text-stone-800">
+              <span className="font-semibold text-stone-900">Реестр в системе:</span>{" "}
               {!cacheMetaReady ? (
-                <span className="text-emerald-800/50">проверка…</span>
+                <span className="text-stone-600">проверка…</span>
               ) : registryMetaError ? (
                 <span className="text-red-800/95" title={registryMetaError}>
                   статус неизвестен
@@ -502,16 +377,16 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
                 <span className="text-amber-800/90">не загружен</span>
               )}
             </p>
-            <p className="text-emerald-900/80">
-              <span className="font-semibold text-emerald-950">Дата загрузки / обновления:</span>{" "}
+            <p className="text-stone-800">
+              <span className="font-semibold text-stone-900">Дата загрузки / обновления:</span>{" "}
               {!cacheMetaReady ? (
-                <span className="text-emerald-800/50">—</span>
+                <span className="text-stone-600">—</span>
               ) : registryMetaError ? (
-                <span className="text-emerald-800/50">—</span>
+                <span className="text-stone-600">—</span>
               ) : registryLoaded && registryUploadedAt ? (
-                <span className="text-emerald-800">{registryUploadedAt}</span>
+                <span className="text-stone-800">{registryUploadedAt}</span>
               ) : (
-                <span className="text-emerald-800/55">—</span>
+                <span className="text-stone-600">—</span>
               )}
             </p>
             {registryMetaError && cacheMetaReady ? (
@@ -524,20 +399,28 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
             ) : null}
             {registryLoaded && cacheMeta ? (
               <>
-                <p className="text-emerald-800/50">
+                <p className="text-stone-600">
                   В кэше записей:{" "}
-                  <span className="font-medium tabular-nums text-emerald-900/70">{cacheMeta.record_count}</span>
+                  <span className="font-medium tabular-nums text-stone-800">
+                    {cacheMeta.record_count}
+                  </span>
                 </p>
-                <p className="text-emerald-800/50">
+                <p className="text-stone-600">
                   Принимают от других:{" "}
-                  <span className="font-medium tabular-nums text-emerald-900/70">
+                  <span className="font-medium tabular-nums text-stone-800">
                     {cacheMeta.accepts_true_count ?? "—"}
                   </span>
                 </p>
-                <p className="text-emerald-800/50">
+                <p className="text-stone-600">
                   Не принимают от других:{" "}
-                  <span className="font-medium tabular-nums text-emerald-900/70">
+                  <span className="font-medium tabular-nums text-stone-800">
                     {cacheMeta.accepts_false_count ?? "—"}
+                  </span>
+                </p>
+                <p className="text-stone-600">
+                  Не определено (приём от других):{" "}
+                  <span className="font-medium tabular-nums text-stone-800">
+                    {cacheMeta.accepts_unknown_count ?? "—"}
                   </span>
                 </p>
               </>
@@ -555,196 +438,187 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
           </div>
         </div>
         {canImportRegistry ? (
-          <div className="flex shrink-0 flex-col gap-2 sm:items-end">
+          <div className="flex shrink-0 flex-col gap-2 sm:items-end sm:pt-1">
             <input
               ref={fileRef}
               type="file"
-              accept="application/pdf,.pdf"
+              accept=".pdf,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff,.html,.htm,.txt,application/pdf,image/jpeg,image/png,image/webp,text/html,text/plain"
               multiple
               className="hidden"
               onChange={(e) => void handleRegistryFiles(e.target.files)}
             />
-            <button
+            <Button
               type="button"
+              variant="primary"
+              size="lg"
               onClick={() => fileRef.current?.click()}
               disabled={importBusy}
-              className="rounded-2xl border border-emerald-200/90 bg-white px-4 py-2.5 text-sm font-medium text-emerald-950 shadow-sm shadow-emerald-900/5 transition hover:border-emerald-300 hover:bg-emerald-50/80 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {importBusy ? "Обработка…" : "Загрузить реестр"}
-            </button>
+            </Button>
           </div>
         ) : null}
       </header>
 
-      {importError ? (
-        <p className="rounded-xl border border-red-200/90 bg-red-50/95 px-4 py-3 text-sm text-red-800">{importError}</p>
-      ) : null}
+      <RegistryImportPanel
+        importError={importError}
+        importBusy={importBusy}
+        importMessage={importMessage}
+        importProgress={importProgress}
+        importMetrics={importMetrics}
+        importTimeline={importTimeline}
+        uploadEtaSec={uploadEtaSec}
+        uploadSpeedMbps={uploadSpeedMbps}
+        uploadPhase={uploadPhase}
+        importElapsedSec={importElapsedSec}
+        totalEtaSec={totalEtaSec}
+      />
 
-      {importBusy ? (
-        <div
-          className="rounded-2xl border border-emerald-200/80 bg-emerald-50/90 px-4 py-4 shadow-sm shadow-emerald-900/5"
-          role="status"
-          aria-live="polite"
-        >
-          <p className="mb-3 text-sm font-medium text-emerald-950">{importMessage || "Обработка…"}</p>
-          <div className="h-2.5 w-full overflow-hidden rounded-full bg-emerald-100">
-            <div
-              className="h-full rounded-full bg-emerald-500 transition-[width] duration-300 ease-out"
-              style={{ width: `${importProgress}%` }}
-            />
-          </div>
-          {importMetrics ? (
-            <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] leading-snug text-emerald-900/75 sm:grid-cols-4">
-              <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
-                Скорость: <b>{importMetrics.rows_per_sec ?? EM_DASH}</b>/с
-              </span>
-              <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
-                ETA: <b>{formatEta(importMetrics.eta_sec)}</b>
-              </span>
-              <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
-                Nominatim: <b>{importMetrics.nominatim_calls ?? 0}</b>
-              </span>
-              <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
-                Кэш/approx: <b>{(importMetrics.cache_hit ?? 0) + (importMetrics.approx_hit ?? 0)}</b>
-              </span>
-              <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
-                Чекпоинты: <b>{importMetrics.checkpoints ?? 0}</b>
-              </span>
-              <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
-                DB snapshot: <b>{importMetrics.db_snapshots ?? 0}</b>
-              </span>
-              <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
-                Geocache flush: <b>{importMetrics.geocache_flushes ?? 0}</b>
-              </span>
-              {(importMetrics.llm_calls ?? 0) > 0 ? (
-                <>
-                  <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
-                    LLM calls: <b>{importMetrics.llm_calls ?? 0}</b>
-                  </span>
-                  <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
-                    LLM ok/fail: <b>{importMetrics.llm_success ?? 0}</b>/<b>{importMetrics.llm_fail ?? 0}</b>
-                  </span>
-                  <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
-                    LLM accepted/applied: <b>{importMetrics.llm_rows_accepted ?? 0}</b>/<b>{importMetrics.llm_rows_applied ?? 0}</b>
-                  </span>
-                </>
-              ) : null}
-              {importStagesReady ? (
-                <>
-                  <span className="rounded-lg bg-emerald-100/80 px-2 py-1">
-                    Стадии (Σ): <b>{formatStageSec(importMetrics.total_sec)}</b>
-                  </span>
-                  <span className="rounded-lg bg-emerald-100/70 px-2 py-1 sm:col-span-2">
-                    Извлечение/парсинг:{" "}
-                    <b>
-                      {formatStageSec(importMetrics.extract_sec)} / {formatStageSec(importMetrics.parse_sec)}
-                    </b>
-                  </span>
-                  <span className="rounded-lg bg-emerald-100/70 px-2 py-1 sm:col-span-2">
-                    Checkbox/merge/geocode:{" "}
-                    <b>
-                      {formatStageSec(importMetrics.checkbox_sec)} / {formatStageSec(importMetrics.merge_sec)} /{" "}
-                      {formatStageSec(importMetrics.geocode_sec)}
-                    </b>
-                  </span>
-                </>
-              ) : null}
-            </div>
-          ) : null}
-          <p className="mt-2 text-xs text-emerald-900/50">
-            {/\bстраница\s+\d+/i.test(importMessage) ? (
-              <>
-                Сейчас на сервере извлекается текст из PDF (это ещё не геокодирование). Очень большие части II
-                идут долго; если номер страницы долго не меняется — часто «тяжёлая» страница или режим pdfplumber.
-                Убедитесь, что API собран с PyMuPDF по умолчанию и в{" "}
-                <code className="rounded bg-emerald-100/80 px-1">REGISTRY_PDF_TEXT_BACKEND</code> не задано{" "}
-                <code className="rounded bg-emerald-100/80 px-1">pdfplumber</code>.
-              </>
-            ) : (
-              <>
-                Геокодирование адресов идёт через Nominatim и может занять несколько минут при первой загрузке
-                (этап «Геокодирование: …» в сообщении выше).
-              </>
-            )}
-          </p>
-        </div>
-      ) : null}
-
-      <section className="flex flex-col gap-5">
-        <div className="flex flex-col gap-2">
-          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-stretch">
-            <label className="min-w-0 flex-1">
+      <section className="flex flex-col gap-4">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,28rem)] lg:items-stretch lg:gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 max-w-4xl flex-col gap-2.5 sm:flex-row sm:items-stretch">
+            <label className="relative min-w-0 sm:flex-1">
               <span className="sr-only">
-                Код объекта или вид отхода — строка поиска
+                Код отхода или вид отхода — строка поиска
               </span>
               <input
                 type="search"
                 value={queryInput}
                 onChange={(e) => {
                   setQueryInput(e.target.value);
+                  setShowWasteSuggest(true);
+                  setWasteSuggestActive(0);
                 }}
-                onKeyDown={(e) => e.key === "Enter" && submitQuery()}
-                placeholder="Код объекта или вид отхода"
+                onBlur={() => {
+                  setTimeout(() => setShowWasteSuggest(false), 120);
+                }}
+                onFocus={() => {
+                  if (wasteSuggest.length > 0) {
+                    setShowWasteSuggest(true);
+                    if (wasteSuggestActive < 0) setWasteSuggestActive(0);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setShowWasteSuggest(false);
+                    setWasteSuggestActive(-1);
+                    return;
+                  }
+                  if (showWasteSuggest && wasteSuggest.length > 0 && e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setWasteSuggestActive((prev) => {
+                      const base = prev < 0 ? 0 : prev;
+                      return Math.min(wasteSuggest.length - 1, base + 1);
+                    });
+                    return;
+                  }
+                  if (showWasteSuggest && wasteSuggest.length > 0 && e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setWasteSuggestActive((prev) => {
+                      const base = prev < 0 ? 0 : prev;
+                      return Math.max(0, base - 1);
+                    });
+                    return;
+                  }
+                  if (e.key === "Enter") {
+                    if (showWasteSuggest && wasteSuggest.length > 0) {
+                      const idx = wasteSuggestActive >= 0 ? wasteSuggestActive : 0;
+                      const picked = wasteSuggest[Math.max(0, Math.min(wasteSuggest.length - 1, idx))];
+                      if (picked) {
+                        applySuggestion(picked);
+                        return;
+                      }
+                    }
+                    submitQuery();
+                  }
+                }}
+                placeholder="Код отхода или вид отхода"
                 disabled={importBusy}
-                className="h-full w-full min-h-[3rem] rounded-2xl border border-emerald-100 bg-white/90 px-5 py-3.5 text-base text-stone-800 shadow-inner shadow-emerald-900/5 outline-none ring-emerald-200/60 placeholder:text-emerald-900/35 focus:border-emerald-300 focus:ring-2 disabled:opacity-60"
+                className="h-full w-full min-h-[2.85rem] rounded-2xl border border-emerald-200/70 bg-white px-4 py-3 text-[15px] text-stone-800 shadow-sm shadow-emerald-950/[0.04] outline-none ring-emerald-200/50 placeholder:text-stone-500 focus:border-emerald-400/80 focus:ring-2 focus:ring-emerald-300/50 disabled:opacity-60"
               />
+              {showWasteSuggest && wasteSuggest.length > 0 ? (
+                <div className="absolute z-30 mt-1 w-full overflow-hidden rounded-xl border border-emerald-200/80 bg-white shadow-lg shadow-emerald-900/10">
+                  <ul className="max-h-72 overflow-auto py-1 text-sm">
+                    {wasteSuggest.map((it, i) => {
+                      const label = suggestionLabel(it);
+                      const active = i === wasteSuggestActive;
+                      return (
+                        <li key={`${it.waste_code}-${i}`}>
+                          <button
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onMouseEnter={() => setWasteSuggestActive(i)}
+                            onClick={() => applySuggestion(it)}
+                            className={`w-full px-3 py-2 text-left text-emerald-950 hover:bg-emerald-50 ${
+                              active ? "bg-emerald-50" : ""
+                            }`}
+                          >
+                            {renderHighlightedLabel(label, queryInput)}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ) : null}
             </label>
-            <button
+            <Button
               type="button"
+              variant="primary"
+              size="lg"
               onClick={() => submitQuery()}
               disabled={loading || importBusy}
-              className="shrink-0 rounded-2xl bg-emerald-700 px-6 py-3.5 text-base font-medium text-white shadow-sm shadow-emerald-900/20 transition hover:bg-emerald-800 disabled:opacity-60 sm:min-w-[8.5rem]"
+              className="min-h-[2.85rem] sm:min-w-[8rem] sm:self-auto lg:min-w-[8.5rem]"
             >
               {loading ? (locationChosen ? "Расчёт…" : "Загрузка…") : "Найти"}
-            </button>
-          </div>
-          {showSearchLoader ? (
-            <p
-              className="inline-flex items-center gap-2 text-xs text-emerald-900/75"
-              role="status"
-              aria-live="polite"
-            >
-              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-600" aria-hidden />
-              Загружаем данные по запросу…
-            </p>
-          ) : null}
-          {error ? (
-            <p className="text-sm text-red-600">
-              {error}
-              {typeof error === "string" && error.includes("docker compose") ? null : (
-                <> Локальная разработка: API на порту 8000; Docker: проверьте контейнеры и nginx.</>
-              )}
-            </p>
-          ) : null}
-        </div>
-
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <WasteTypeField value={wasteTypeDisplay} />
-
-          <div className="flex w-full flex-col gap-2 lg:w-80">
-            <span className="text-xs font-medium uppercase tracking-wide text-emerald-800/50">
-              Местоположение объекта
-            </span>
-            <div
-              className={`rounded-2xl border border-emerald-100/80 bg-emerald-50/80 px-4 py-3 text-sm leading-snug shadow-sm shadow-emerald-900/5 min-h-[3.25rem] flex items-center ${
-                locationChosen ? "text-stone-800" : "text-emerald-800/40 italic"
-              }`}
-            >
-              {locationDisplay}
+            </Button>
             </div>
-            <button
-              type="button"
-              onClick={() => setMapOpen(true)}
-              disabled={importBusy}
-              className="rounded-2xl border border-emerald-200/90 bg-emerald-600 px-4 py-3 text-center text-sm font-medium text-white shadow-sm shadow-emerald-900/15 transition hover:border-emerald-300 hover:bg-emerald-700 disabled:opacity-60"
-            >
-              Выбрать местоположение
-            </button>
-            {!locationChosen ? (
-              <p className="text-[11px] leading-snug text-emerald-800/55">
-                После выбора точки на карте появится ориентировочное расстояние до объектов по их адресам.
+            {showSearchLoader ? (
+              <p
+                className="mt-2 inline-flex items-center gap-2 text-xs text-emerald-900/75"
+                role="status"
+                aria-live="polite"
+              >
+                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-600" aria-hidden />
+                Загружаем данные по запросу…
               </p>
             ) : null}
+            <p className="mt-1 text-[11px] text-stone-600">
+              Поиск выполняется только по коду отхода и виду отхода.
+            </p>
+            {error ? (
+              <p className="mt-1 text-sm text-red-600">
+                {error}
+                {typeof error === "string" && error.includes("docker compose") ? null : (
+                  <> Локальная разработка: API на порту 8000; Docker: проверьте контейнеры и nginx.</>
+                )}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="box-border flex w-full max-w-full min-w-0 flex-col rounded-2xl border border-emerald-200/60 bg-white p-4 shadow-sm shadow-emerald-950/[0.05] sm:p-5 lg:h-full lg:min-h-0 lg:justify-center">
+            <div className="flex w-full min-w-0 min-h-[3rem] flex-col gap-3 sm:flex-row sm:items-stretch">
+              <div
+                className={`flex min-h-[3rem] min-w-0 flex-1 basis-0 items-center rounded-2xl border px-3 py-3 text-[13px] leading-snug shadow-sm sm:px-4 ${
+                  locationChosen
+                    ? "border-emerald-200/70 bg-emerald-50/90 text-stone-800 shadow-emerald-950/[0.04]"
+                    : "border-emerald-100/80 bg-emerald-50/50 text-stone-700 italic shadow-emerald-900/[0.03]"
+                }`}
+              >
+                {locationDisplay}
+              </div>
+              <Button
+                type="button"
+                variant="primary"
+                size="lg"
+                onClick={() => setMapOpen(true)}
+                disabled={importBusy}
+                className="min-h-[3rem] w-full min-w-0 flex-1 basis-0 self-stretch whitespace-normal px-3 text-center text-[13px] leading-snug sm:px-4"
+              >
+                Выбрать местоположение
+              </Button>
+            </div>
           </div>
         </div>
       </section>
@@ -752,7 +626,7 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
       <section className="space-y-3">
         {hasActiveQuery ? (
           <div
-            className={`hidden gap-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-emerald-800/70 sm:grid sm:gap-x-5 sm:gap-y-2 ${RESULT_GRID}`}
+            className={`hidden gap-3 px-3 text-[11px] font-semibold uppercase tracking-wide text-stone-700 sm:grid sm:items-stretch sm:gap-x-5 sm:gap-y-2 ${RESULT_GRID}`}
           >
             <span>Код объекта</span>
             <span>Собственник</span>
@@ -788,7 +662,7 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
             {rows.map((row, idx) => (
               <li
                 key={`${row.waste_code ?? "x"}-${row.id}-${idx}`}
-                className={`grid grid-cols-1 gap-3 rounded-2xl border border-emerald-100/90 bg-white/95 p-3 shadow-sm shadow-emerald-900/5 ${RESULT_GRID} sm:items-start sm:gap-x-5 sm:gap-y-3`}
+                className={`grid grid-cols-1 gap-3 rounded-2xl border border-emerald-200/55 bg-white p-4 shadow-md shadow-emerald-950/[0.06] ${RESULT_GRID} sm:items-stretch sm:gap-x-5 sm:gap-y-3`}
               >
                 <CodeCell row={row} />
                 <OwnerCell row={row} />
@@ -810,14 +684,16 @@ export function ObjectsExplorer({ canImportRegistry }: ObjectsExplorerProps) {
           </ul>
           </>
         ) : (
-          <p className="text-center text-xs text-emerald-900/55">
-            Выберите код объекта или вид отхода, затем нажмите «Найти».
+          <p className="text-center text-xs text-stone-600">
+            Выберите код отхода или вид отхода, затем нажмите «Найти».
           </p>
         )}
 
         {hasActiveQuery && !showSkeleton && rows.length === 0 && !error ? (
-          <p className="text-center text-xs text-emerald-900/45">
-            Нет данных: загрузите реестр PDF или измените запрос / точку на карте.
+          <p className="text-center text-xs text-stone-600">
+            {registryLoaded
+              ? "По этому запросу ничего не найдено. Уточните код или вид отхода."
+              : "Нет данных: загрузите реестр PDF или измените запрос / точку на карте."}
           </p>
         ) : null}
       </section>

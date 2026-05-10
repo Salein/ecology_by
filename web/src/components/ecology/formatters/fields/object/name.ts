@@ -81,10 +81,6 @@ export function formatObjectNameDisplay(
   if (/^(?:—|-|объект(?:ы)?)$/i.test(cleaned)) {
     return "Не указан в реестре";
   }
-  if (cleaned.length > 220) {
-    const short = cleaned.slice(0, 220);
-    cleaned = (short.slice(0, short.lastIndexOf(" ")).trim() || short).trim() + "…";
-  }
   cleaned = cleaned.replace(/(?:^|\s)(?:по|для|из|от|на|с|со|и)\s*$/i, "").trim();
 
   return cleaned || "Не указан в реестре";

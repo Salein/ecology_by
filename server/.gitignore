@@ -13,3 +13,6 @@ app/data/user_registry_cache.json
 .venv/
 __pycache__/
 *.py[cod]
+
+# Временные БД для локальных скриптов/проверок импорта
+tmp_*.db

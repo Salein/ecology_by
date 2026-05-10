@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { clearRegistryCache, deleteAdminUser, fetchAdminUsers, patchAdminUser, type AdminUserRow } from "@/lib/api";
+import { Button, linkAsButtonSecondaryClass } from "@/components/ui/Button";
 
 function cloneUserRows(list: AdminUserRow[]): AdminUserRow[] {
   return list.map((r) => ({ ...r }));
@@ -194,40 +195,43 @@ export default function AdminPage() {
         </div>
         <div className="flex flex-wrap gap-2">
           {user.protected_account ? (
-            <button
+            <Button
               type="button"
+              variant="warning"
+              size="md"
               disabled={clearingCache}
               onClick={() => void clearRegistryCacheNow()}
-              className="rounded-xl border border-amber-200/90 bg-white px-4 py-2 text-sm font-medium text-amber-800 transition hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60"
               title="Удалить все записи реестра и связанные кэши на сервере"
             >
               {clearingCache ? "Удаление данных…" : "Удалить данные реестра (БД)"}
-            </button>
+            </Button>
           ) : null}
-          <Link
-            href="/app"
-            className="rounded-xl border border-emerald-200/90 bg-white px-4 py-2 text-sm font-medium text-emerald-900 shadow-sm transition hover:bg-emerald-50/90"
-          >
+          <Link href="/app" className={linkAsButtonSecondaryClass}>
             К приложению
           </Link>
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="md"
             onClick={() => {
               void (async () => {
                 await logout();
                 window.location.href = "/";
               })();
             }}
-            className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-medium text-stone-700 transition hover:bg-stone-50"
           >
             Выйти
-          </button>
+          </Button>
         </div>
       </div>
 
-      {err ? <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{err}</p> : null}
+      {err ? (
+        <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          {err}
+        </p>
+      ) : null}
 
-      <div className="w-full rounded-2xl border border-emerald-100/90 bg-white/95 shadow-sm">
+      <div className="w-full overflow-x-auto rounded-2xl border border-emerald-100/90 bg-white/95 shadow-sm">
         <table className="w-full min-w-0 table-auto text-left text-sm">
           <thead className="border-b border-emerald-100 bg-emerald-50/80 text-xs font-semibold uppercase tracking-wide text-emerald-800/60">
             <tr>
@@ -258,7 +262,9 @@ export default function AdminPage() {
                 const isSelf = user.id === r.id;
                 return (
                   <tr key={r.id} className="border-b border-emerald-50/90 last:border-0">
-                    <td className="min-w-0 px-4 py-3 font-medium text-stone-800">{r.name || "—"}</td>
+                    <td className="min-w-0 px-4 py-3 font-medium text-stone-800">
+                      {r.name || "—"}
+                    </td>
                     <td className="min-w-0 break-words px-4 py-3 text-stone-700">{r.email}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-stone-600 tabular-nums">
                       {formatUserDateTime(r.created_at)}
@@ -347,14 +353,15 @@ export default function AdminPage() {
                           —
                         </span>
                       ) : (
-                        <button
+                        <Button
                           type="button"
+                          variant="danger"
+                          size="sm"
                           disabled={saving || deletingId != null}
                           onClick={() => void removeUser(r.id, r.email)}
-                          className="rounded-lg border border-red-200/90 bg-white px-2.5 py-1.5 text-xs font-medium text-red-800 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           {deletingId === r.id ? "Удаление…" : "Удалить"}
-                        </button>
+                        </Button>
                       )}
                     </td>
                   </tr>
@@ -369,14 +376,16 @@ export default function AdminPage() {
         <p className="text-sm text-emerald-900/55">
           {dirty ? "Есть несохранённые изменения — нажмите «Сохранить», чтобы применить их на сервере." : "Изменения совпадают с сохранёнными."}
         </p>
-        <button
+        <Button
           type="button"
+          variant="primary"
+          size="md"
           disabled={!dirty || loadingList || saving}
           onClick={() => void saveChanges()}
-          className="shrink-0 rounded-xl bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-emerald-300 disabled:text-emerald-100"
+          className="shrink-0 px-5 py-2.5 font-semibold disabled:bg-emerald-300 disabled:text-emerald-100"
         >
           {saving ? "Сохранение…" : "Сохранить изменения"}
-        </button>
+        </Button>
       </div>
     </div>
   );

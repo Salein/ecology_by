@@ -69,6 +69,30 @@ _OBJECT_CANON_HINT_RE = re.compile(
     r"\b(?:мобильн\w*|стационарн\w*|дробильн\w*|сортировочн\w*|установк\w*|комплекс\w*|линия|цех|пункт|участок)\b",
     flags=re.IGNORECASE,
 )
+_INLINE_OWNER_SPLIT_RE = re.compile(r"(?i)\bСобственник\b")
+_ADDRESS_HINT_LINE_RE = re.compile(
+    r"\b(?:обл\.|р-н|с/с|ул\.|улица|д\.|г\.|пер\.|просп\.|дер\.|республика|область|шоссе|б-р)\b",
+    flags=re.IGNORECASE,
+)
+_PHONE_OR_FAX_RE = re.compile(
+    r"(?:\+?\s*375|8-0?\d{2,4}|\(\s*0\d{2,4}\s*\)|\bтел\.?\b|\bфакс\b)",
+    flags=re.IGNORECASE,
+)
+
+_TRAILING_CITY_WORD_RE = re.compile(r"\b([А-ЯЁ][а-яё\-]{2,})\s*$")
+_CITY_STOPWORDS = {
+    "ООО",
+    "ОАО",
+    "ЗАО",
+    "УП",
+    "РУП",
+    "ЧУП",
+    "КУП",
+    "ГУ",
+    "ГУП",
+    "КПУП",
+    "КХП",
+}
 
 
 def _is_object_field_noise_line(line: str) -> bool:
@@ -121,6 +145,15 @@ def _select_canonical_object_name(blob: str, waste_type_name: str) -> str:
     return ranked[0]
 
 
+_NAME_FINAL_STRIP = " ,;:.«»*-–—"
+
+
+def _normalize_phrase_dashes(s: str) -> str:
+    """Типографские тире и ASCII-дефис только как разделитель (с пробелами) → пробел; составные «слово-слово» сохраняем."""
+    s = re.sub(r"\s*[—–]\s*", " ", s)
+    return re.sub(r"\s+-\s+", " ", s)
+
+
 def _clean_object_name_final(name: str, waste_type_name: str = "") -> str:
     """
     Финальная чистка названия объекта:
@@ -129,8 +162,11 @@ def _clean_object_name_final(name: str, waste_type_name: str = "") -> str:
     - убирает префикс вида отхода, если он попал в object_name.
     """
     s = re.sub(r"\s+", " ", (name or "").replace("\xa0", " ")).strip(" ,;:.")
+    s = re.sub(r"[`´‘’“”]", '"', s)
+    s = _normalize_phrase_dashes(s)
     if not s:
         return ""
+    s_initial = s
 
     s = re.sub(r"объекты?\s*,?\s*которые\s+принимают\s+отходы?\s+от\s+других(?:\s+лиц)?", " ", s, flags=re.IGNORECASE)
     s = re.sub(r"принимает\s+отходы?\s+от\s+других(?:\s+лиц)?", " ", s, flags=re.IGNORECASE)
@@ -144,6 +180,12 @@ def _clean_object_name_final(name: str, waste_type_name: str = "") -> str:
 
     # Часто после реального названия объекта подмешивается хвост собственника.
     s = re.sub(r"(?:коммунальное|республиканское|государственное|частное)\s+унитарное\s+предприятие.*$", "", s, flags=re.IGNORECASE)
+    s = re.sub(
+        r"(?:коммунальное|республиканское|государственное|частное)\s+производственное\s+унитарное\s+предприятие.*$",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
     s = re.sub(r"(?:коммунальное|государственное)\s+предприятие.*$", "", s, flags=re.IGNORECASE)
     legal_tail = re.search(r"(^|[^A-Za-zА-Яа-яЁё])(?:ООО|ОАО|ЗАО|УП|РУП|ЧУП|ОДО|ИП)(?=$|[^A-Za-zА-Яа-яЁё])", s, flags=re.IGNORECASE)
     if legal_tail and legal_tail.start() > 12:
@@ -155,12 +197,122 @@ def _clean_object_name_final(name: str, waste_type_name: str = "") -> str:
     m_addr = re.search(r"\b(?:г\.|ул\.|улица|д\.|дом|обл\.|область|район|р-н|с/с)\b", s, flags=re.IGNORECASE)
     if m_addr and m_addr.start() > 12:
         cut_markers.append(m_addr.start())
+    m_addr_ocr = re.search(
+        r"\b(?:г\s+[А-ЯЁA-Z]|ул\s+[А-ЯЁA-Z]|пер\s+[А-ЯЁA-Z]|просп\s+[А-ЯЁA-Z])",
+        s,
+        flags=re.IGNORECASE,
+    )
+    if m_addr_ocr and m_addr_ocr.start() > 12:
+        cut_markers.append(m_addr_ocr.start())
+    m_phone = re.search(
+        r"(?:\+?\s*375|8-0?\d{2,4}|\(\s*0\d{2,4}\s*\)|\bтел\.?\b|\bфакс\b)",
+        s,
+        flags=re.IGNORECASE,
+    )
+    if m_phone and m_phone.start() > 10:
+        cut_markers.append(m_phone.start())
     if cut_markers:
         s = s[: min(cut_markers)]
+    m_tail_addr = re.search(
+        r"(?:,\s*|\s+)(?:г\.?|ул\.?|улица|д\.?|дом|обл\.?|область|район|р-н)\s+",
+        s,
+        flags=re.IGNORECASE,
+    )
+    if m_tail_addr and m_tail_addr.start() > 12:
+        s = s[: m_tail_addr.start()]
+    # Частый OCR-кейс: объект и адрес склеены через запятую в одной строке.
+    if "," in s:
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        if len(parts) >= 2:
+            tail = ", ".join(parts[1:])
+            if re.search(
+                r"(?:\b\d{6}\b|\+?\s*375|\(\s*0\d{2,4}\s*\)|\bг\.?\b|\bул\.?\b|\bд\.?\b|\bобл\.?\b|\bр-н\b)",
+                tail,
+                flags=re.IGNORECASE,
+            ):
+                s = parts[0]
 
-    s = re.sub(r"\s+", " ", s).strip(" ,;:.\"'«»*-–—")
+    s = re.sub(r"\s+", " ", s).strip(_NAME_FINAL_STRIP)
     if re.fullmatch(r"(?:—|-|объект(?:ы)?)", s, flags=re.IGNORECASE):
         return ""
+    if len(s) < 3:
+        # Если агрессивная чистка "съела" почти всё (частый OCR/моджибейк),
+        # возвращаем исходный вариант после базовой нормализации пробелов/пунктуации.
+        s_fallback = re.sub(r"\s+", " ", s_initial).strip(_NAME_FINAL_STRIP)
+        return "" if len(s_fallback) < 3 else s_fallback
+    return s
+
+
+def _clean_owner_name_final(name: str) -> str:
+    s = re.sub(r"\s+", " ", (name or "").replace("\xa0", " ")).strip(" ,;:.")
+    if not s:
+        return ""
+    s = re.sub(r"[`´‘’“”]", '"', s)
+    s = _normalize_phrase_dashes(s)
+    # Не допускаем адрес/телефон в колонке "Собственник".
+    m_postal = re.search(r"\b\d{6}\b", s)
+    if m_postal and m_postal.start() > 8:
+        s = s[: m_postal.start()]
+    m_addr = re.search(
+        r"\b(?:г\.|ул\.|улица|д\.|дом|обл\.|область|район|р-н|аг\.|дер\.|пос\.|пер\.|просп\.|шоссе)\b",
+        s,
+        flags=re.IGNORECASE,
+    )
+    if m_addr and m_addr.start() > 14:
+        s = s[: m_addr.start()]
+    m_phone = re.search(
+        r"(?:\+?\s*375|8-0?\d{2,4}|\(\s*0\d{2,4}\s*\)|\bтел\.?\b|\bфакс\b)",
+        s,
+        flags=re.IGNORECASE,
+    )
+    if m_phone and m_phone.start() > 8:
+        s = s[: m_phone.start()]
+    m_city_tail = re.search(
+        r"\s+\bг\.?\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2}\s*$",
+        s,
+        flags=re.IGNORECASE,
+    )
+    if m_city_tail and m_city_tail.start() > 12:
+        s = s[: m_city_tail.start()]
+    m_region_tail = re.search(
+        r"\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\- ]+\s+(?:обл\.?|область)\s*$",
+        s,
+        flags=re.IGNORECASE,
+    )
+    if m_region_tail and m_region_tail.start() > 12:
+        s = s[: m_region_tail.start()]
+    if "," in s:
+        left, right = s.split(",", 1)
+        if len(left.strip()) >= 6 and re.search(r"(?:\b\d{6}\b|\bобл\.?\b|\bр-н\b|\bрайон\b|\bг\.?\b)", right, re.IGNORECASE):
+            s = left
+    s = re.sub(r"\s+", " ", s).strip(_NAME_FINAL_STRIP)
+    if len(s) < 3:
+        return ""
+    return s
+
+
+def _extract_trailing_city_word(text: str) -> str:
+    s = re.sub(r"\s+", " ", (text or "").replace("\xa0", " ")).strip(_NAME_FINAL_STRIP)
+    if not s:
+        return ""
+    m = _TRAILING_CITY_WORD_RE.search(s)
+    if not m:
+        return ""
+    city = (m.group(1) or "").strip()
+    if not city:
+        return ""
+    if city.upper() in _CITY_STOPWORDS:
+        return ""
+    return city
+
+
+def _strip_trailing_city_word(text: str, city: str) -> str:
+    s = re.sub(r"\s+", " ", (text or "").replace("\xa0", " ")).strip(_NAME_FINAL_STRIP)
+    c = (city or "").strip()
+    if not s or not c:
+        return s
+    if s.casefold().endswith((" " + c).casefold()):
+        s = s[: -len(c)].strip(_NAME_FINAL_STRIP)
     return s
 
 
@@ -187,7 +339,12 @@ def _extract_address_hint(s: str) -> str | None:
     if not m:
         return None
     hint = m.group(0)
-    hint = re.sub(r"\b(предприятие|использует|принимает)\b.*$", "", hint, flags=re.IGNORECASE).strip()
+    hint = re.sub(
+        r"\b(предприятие|использует|принимает|объект(?:ы)?|собственник)\b.*$",
+        "",
+        hint,
+        flags=re.IGNORECASE,
+    ).strip()
     hint = re.sub(r"[,\s]+$", "", hint)
     return hint or None
 
@@ -204,6 +361,118 @@ _LOCALITY_RE = re.compile(
     r"|городок\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+){0,2})\b",
     flags=re.IGNORECASE,
 )
+_STREET_RE = re.compile(
+    r"\b(?:ул\.|улица|пер\.|просп\.|б-р|шоссе)\s*[^,;]{2,80}",
+    flags=re.IGNORECASE,
+)
+_HOUSE_RE = re.compile(r"\b(?:д\.|дом)\s*\d+[A-Za-zА-Яа-я0-9/\-]*", flags=re.IGNORECASE)
+_REGION_RE = re.compile(r"\b[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\- ]+\s+обл\.(?=[,\s]|$)", flags=re.IGNORECASE)
+_DISTRICT_RE = re.compile(r"\b[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\- ]+\s+(?:р-н|район)\b", flags=re.IGNORECASE)
+# «220030, Минск, ул. …» без префикса «г.» — для геокодера и address_no_locality.
+# (?<!\d) вместо \b: граница слова перед цифрой в начале строки не срабатывает.
+# Класс символов города — через Unicode-диапазоны (устойчивее к homoglyph в исходнике).
+_CYR_LET_CLASS = r"\u0410-\u042f\u0430-\u044f\u0401\u0451"
+_BARE_LOCALITY_AFTER_POSTAL_RE = re.compile(
+    rf"(?<!\d)(\d{{6}})\s*,\s*"
+    rf"([{_CYR_LET_CLASS}A-Z][{_CYR_LET_CLASS}A-Za-z\-\s]{{2,45}}?)\s*,\s*"
+    r"(?=(?:\u0443\u043b\.|\u0443\u043b\u0438\u0446\u0430|\u043f\u0435\u0440\.|\u043f\u0440\u043e\u0441\u043f\.|"
+    r"\u0431\u002d\u0440|\u0448\u043e\u0441\u0441\u0435|\u0434\.|\u0434\u043e\u043c))",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_bare_locality_after_postal(address: str) -> str:
+    if not address or _LOCALITY_RE.search(address):
+        return address
+
+    def repl(m: re.Match[str]) -> str:
+        post, city = m.group(1), re.sub(r"\s+", " ", (m.group(2) or "").strip())
+        if not city or re.match(r"г\.", city, flags=re.IGNORECASE):
+            return m.group(0)
+        if re.search(r"\b(?:обл\.|р-н|район|область)\b", city, flags=re.IGNORECASE):
+            return m.group(0)
+        if re.fullmatch(r"\d+", city):
+            return m.group(0)
+        return f"{post}, г. {city}, "
+
+    return _BARE_LOCALITY_AFTER_POSTAL_RE.sub(repl, address)
+
+
+def _merge_split_phone_lines(text: str) -> str:
+    """Склеивает номер, разорванный переносом строки (частый артефакт PDF)."""
+    lines = (text or "").replace("\xa0", " ").splitlines()
+    if len(lines) < 2:
+        return text
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        cur = lines[i].rstrip()
+        if i + 1 < len(lines):
+            nxt = lines[i + 1].strip()
+            merge = False
+            if re.search(r"\+?\s*375\s*$", cur) and re.match(r"^[\s\(]*\d", nxt):
+                merge = True
+            elif re.search(r"\(\s*0\d{2,4}\s*\)\s*$", cur) and re.match(r"^[\d\s\-–]{4,}", nxt):
+                merge = True
+            elif re.search(r"(?i)(?:тел\.?|моб\.?|сот\.?|факс)\s*:?\s*$", cur) and re.match(
+                r"^[\d\s\+\(\)\-–]{5,}", nxt
+            ):
+                merge = True
+            if merge:
+                out.append(f"{cur} {nxt}")
+                i += 2
+                continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def _extract_address_components(address: str) -> dict[str, str]:
+    s = re.sub(r"\s+", " ", (address or "").replace("\xa0", " ")).strip(" ,;")
+    if not s:
+        return {"postal": "", "locality": "", "region": "", "district": "", "street": "", "house": "", "raw": ""}
+    pm = re.search(r"\b(\d{6})\b", s)
+    lm = _LOCALITY_RE.search(s)
+    sm = _STREET_RE.search(s)
+    hm = _HOUSE_RE.search(s)
+    rm = _REGION_RE.search(s)
+    dm = _DISTRICT_RE.search(s)
+    return {
+        "postal": pm.group(1) if pm else "",
+        "locality": re.sub(r"\s+", " ", lm.group(1)).strip(" ,;") if lm else "",
+        "region": re.sub(r"\s+", " ", rm.group(0)).strip(" ,;") if rm else "",
+        "district": re.sub(r"\s+", " ", dm.group(0)).strip(" ,;") if dm else "",
+        "street": re.sub(r"\s+", " ", sm.group(0)).strip(" ,;") if sm else "",
+        "house": re.sub(r"\s+", " ", hm.group(0)).strip(" ,;") if hm else "",
+        "raw": s,
+    }
+
+
+def _canonicalize_address_from_components(address: str) -> str:
+    c = _extract_address_components(address)
+    if not c["raw"]:
+        return ""
+    parts: list[str] = []
+    if c["postal"]:
+        parts.append(c["postal"])
+    if c["locality"]:
+        parts.append(c["locality"])
+    if c["district"]:
+        parts.append(c["district"])
+    if c["region"]:
+        parts.append(c["region"])
+    if c["street"]:
+        parts.append(c["street"])
+    if c["house"]:
+        # Don't duplicate house if it is already inside street segment.
+        if c["house"].casefold() not in c["street"].casefold():
+            parts.append(c["house"])
+    if not parts:
+        return c["raw"]
+    out = ", ".join(parts)
+    out = re.sub(r",\s*,", ",", out)
+    out = re.sub(r"[,\s]+$", "", out).strip()
+    return out or c["raw"]
 
 
 def _dedupe_locality_in_address(address: str) -> str:
@@ -306,6 +575,12 @@ def _clean_address_noise_final(address: str) -> str:
     if has_real_city:
         merged = re.sub(r"(?:,\s*|\s+)г\.\s*\(не\s*указано\)\b", "", merged, flags=re.IGNORECASE)
     merged = re.sub(r",\s*,", ",", merged)
+    merged = re.sub(
+        r"\b(г\.\s*[А-ЯЁA-Z][А-ЯЁA-Za-zа-яё\-]+)\s*,\s*\1\b",
+        r"\1",
+        merged,
+        flags=re.IGNORECASE,
+    )
     merged = re.sub(r"[,\s]+$", "", merged).strip()
     return merged
 
@@ -319,6 +594,8 @@ def _ensure_locality_in_address(address: str, *sources: str) -> str:
     compact = re.sub(r"\s+", " ", (address or "").replace("\xa0", " ")).strip()
     if not compact:
         return compact
+    compact = _normalize_bare_locality_after_postal(compact)
+    compact = re.sub(r"\s+", " ", compact).strip()
     if _LOCALITY_RE.search(compact):
         return _dedupe_locality_in_address(compact)
 
@@ -419,22 +696,7 @@ def extract_name_address_multiline(blob: str) -> tuple[str, str]:
             continue
         if phase == "after_addr":
             low = line.casefold()
-            addr_hints = (
-                "обл.",
-                "р-н",
-                "с/с",
-                "ул.",
-                "улица",
-                "д.",
-                "г.",
-                "пер.",
-                "просп.",
-                "дер.",
-                "д.",
-                "республика",
-                "область",
-            )
-            if any(h in low for h in addr_hints) or POSTAL.search(line):
+            if _ADDRESS_HINT_LINE_RE.search(low) or POSTAL.search(line):
                 addr_parts.append(line)
             else:
                 name_parts.append(line)
@@ -449,10 +711,48 @@ def extract_name_address_multiline(blob: str) -> tuple[str, str]:
     return name, address
 
 
+def _owner_blob_body_for_name_address(blob: str) -> str:
+    """
+    Убирает первую строку-метку «Собственник» (часто отдельной строкой в PDF),
+    чтобы extract_name_address_multiline не обрывался на первой же итерации.
+    """
+    raw = [ln.strip() for ln in (blob or "").replace("\xa0", " ").splitlines() if ln.strip()]
+    if not raw:
+        return ""
+    m = OWNER_START.match(raw[0])
+    if not m:
+        return (blob or "").strip()
+    first_tail = (m.group(1) or "").strip()
+    rest = raw[1:]
+    if first_tail:
+        return "\n".join([first_tail, *rest]).strip()
+    return "\n".join(rest).strip()
+
+
 def clean_owner_blob(blob: str) -> str:
     blob = blob.replace("\xa0", " ").strip()
     blob = _trim_tail_noise(blob)
     return re.sub(r"\s+", " ", blob).strip()
+
+
+def _owner_names_from_naimenovanie_lines(blob: str) -> list[str]:
+    """Строки вида «Наименование организации: …» из PDF-выгрузок."""
+    found: list[str] = []
+    for ln in (blob or "").replace("\xa0", " ").splitlines():
+        s = re.sub(r"\s+", " ", ln).strip()
+        m = re.match(
+            r"(?i)(?:полное\s+)?наименование(?:\s+организации)?\s*[:;]\s*(.+)$",
+            s,
+        )
+        if not m:
+            continue
+        val = m.group(1).strip(" ,;:\"'«»")
+        if len(val) < 4 or re.search(r"^\d{6}\b", val):
+            continue
+        if re.search(r"\b(?:ул\.|улица|д\.|г\.)\b", val, flags=re.IGNORECASE):
+            continue
+        found.append(val)
+    return found
 
 
 def _select_canonical_owner_name(blob: str) -> str:
@@ -461,10 +761,14 @@ def _select_canonical_owner_name(blob: str) -> str:
     приоритет — строки с юр-формой (ООО/ОАО/УП/...),
     без адресных и телефонных хвостов.
     """
-    lines: list[str] = []
+    labelled = _owner_names_from_naimenovanie_lines(blob)
+    labelled_set = set(labelled)
+    lines: list[str] = list(labelled)
     for ln in (blob or "").replace("\xa0", " ").splitlines():
         s = re.sub(r"\s+", " ", ln).strip(" ,;")
         if not s:
+            continue
+        if re.match(r"(?i)(?:полное\s+)?наименование(?:\s+организации)?\s*[:;]", s):
             continue
         if _is_registry_noise_line(s):
             continue
@@ -473,6 +777,8 @@ def _select_canonical_owner_name(blob: str) -> str:
         if re.search(r"\b\d{6}\b", s):
             continue
         if re.search(r"(?:\+?\s*375|8-0?\d{2,4}|\(\s*0\d{2,4}\s*\)|\bтел\.?\b|\bфакс\b)", s, flags=re.IGNORECASE):
+            continue
+        if s in labelled_set:
             continue
         lines.append(s)
     if not lines:
@@ -483,6 +789,8 @@ def _select_canonical_owner_name(blob: str) -> str:
 
     def _owner_line_score(s: str) -> int:
         score = 0
+        if s in labelled_set:
+            score += 28
         if _OWNER_HINT_RE.search(s):
             score += 80
         if _OWNER_ORG_HINT_RE.search(s):
@@ -517,7 +825,11 @@ def _select_canonical_owner_name(blob: str) -> str:
 
     ranked.sort(key=lambda x: (-_owner_line_score(x), -len(x), x.casefold()))
     best = ranked[0]
-    if _owner_line_score(best) < 35:
+    best_sc = _owner_line_score(best)
+    if best_sc < 35:
+        # Длинное наименование без явной ОПФ (трест, филиал, …) — не отбрасываем целиком.
+        if len(best) >= 22 and best_sc >= 24 and re.search(r"[A-Za-zА-Яа-яЁё]{12,}", best):
+            return best
         return ""
     return best
 
@@ -526,7 +838,15 @@ def _extract_owner_hint_from_text(text: str) -> str:
     compact = re.sub(r"\s+", " ", (text or "").replace("\xa0", " ")).strip()
     if not compact:
         return ""
-    parts = [p.strip() for p in re.split(r"[;,]", compact) if p.strip()]
+    parts: list[str] = []
+    for block in re.split(r"[\n\r]+", compact):
+        block = re.sub(r"\s+", " ", block).strip(" ,;")
+        if not block:
+            continue
+        if re.search(r"[;,]", block):
+            parts.extend(p.strip() for p in re.split(r"[;,]", block) if p.strip())
+        else:
+            parts.append(block)
     best = ""
     best_score = -10_000
     for seg in parts:
@@ -561,6 +881,8 @@ def _extract_owner_hint_from_text(text: str) -> str:
         if re.search(r"[\"«»]", cand):
             score += 8
         score += min(22, len(cand) // 7)
+        if len(cand) >= 14 and re.search(r"[A-Za-zА-Яа-яЁё]{10,}", cand) and not _OWNER_HINT_RE.search(cand):
+            score += 18
         if re.fullmatch(
             r"(?:управление|предприятие|организация|компания|филиал|участок|цех|отдел|дирекция|служба)",
             cand.strip(),
@@ -570,7 +892,7 @@ def _extract_owner_hint_from_text(text: str) -> str:
         if score > best_score:
             best_score = score
             best = cand
-    if best_score < 40:
+    if best_score < 34:
         return ""
     return best
 
@@ -594,13 +916,19 @@ def owner_display_name(owner_blob: str, object_blob: str = "", address_text: str
     canonical = _select_canonical_owner_name(owner_blob)
     if canonical:
         return canonical
-    hinted = _extract_owner_hint_from_text(f"{owner_blob} {object_blob} {address_text}")
+    owner_body = _owner_blob_body_for_name_address(owner_blob)
+    pool = f"{owner_blob} {object_blob} {address_text}"
+    pool_body = f"{owner_body} {object_blob} {address_text}"
+    hinted = _extract_owner_hint_from_text(pool)
+    hinted_body = _extract_owner_hint_from_text(pool_body)
+    if hinted_body and (not hinted or len(hinted_body) > len(hinted)):
+        hinted = hinted_body
     if hinted:
         return hinted
-    name, _addr = extract_name_address_multiline(owner_blob)
+    name, _addr = extract_name_address_multiline(owner_body)
     if len(name) >= 6 and not _looks_like_owner_noise_value(name):
         return name
-    cleaned = clean_owner_blob(owner_blob)
+    cleaned = clean_owner_blob(owner_body)
     if not _looks_like_owner_noise_value(cleaned):
         return cleaned
     return ""
@@ -624,12 +952,18 @@ def extract_phones_from_text(*blobs: str) -> str:
     text = "\n".join(b for b in blobs if b)
     if not text.strip():
         return ""
+    text = _merge_split_phone_lines(text)
     # Ограничение длины групп и проверка _phone_digits_reasonable уменьшают слипание с кодами объектов.
     # Шаблон «ровно 11 цифр» убран — он часто цеплял лишние цифры из соседних полей.
     patterns = [
         r"(?<!\d)\(?0\d{2,4}\)?\s*[\d\s\-–]{5,18}(?:\s*,\s*[\d\s\-–]{3,12}){0,3}(?!\d)",
         r"8-\d{2,4}(?:-\d{2,}){2,5}(?!\d)",
         r"(?:тел\.?|факс)\s*[:\.]?\s*[\d\s\-–,\(\)]{5,22}(?=\s|$|[;А-Яа-яA-Za-zёЁ])",
+        r"(?i)(?:тел(?:ефон)?\s*:|тел\s*\.?\s*:|ф\s*\.)\s*[\d\s\+()\-–]{6,26}(?=\s|$|[;А-Яа-яA-Za-zёЁ])",
+        r"(?i)(?:моб\.?|сот\.?)\s*[:\.]?\s*(?:\+?\s*375\s*)?[\d\s\(\)\-–]{8,22}(?!\d)",
+        r"(?<!\d)\+?\s*375\s*\(?\d{2,3}\)?\s*\d{2}[\s\-–]?\d{3}(?!\d)",
+        r"(?<!\d)\+?\s*375\s*\(?\d{2,3}\)?\s*\d{3}[\s\-–]?\d{2}[\s\-–]?\d{2}(?!\d)",
+        r"(?<!\d)\+?\s*375\s*\(?\d{2,3}\)?\s*\d{2,3}[\s\-–]?\d{2}[\s\-–]?\d{2,3}(?!\d)",
         # +375 с пробелами/скобками: «+375 (29) 563-38-19»
         r"(?<!\d)\+?\s*375(?:[\s\(\)\-–]*\d){9}(?!\d)",
         r"(?<!\d)(?:\+?375|80)\d{9}(?!\d)",
@@ -658,24 +992,42 @@ def extract_phones_from_text(*blobs: str) -> str:
             out.append(s)
             if len(out) >= 12:
                 return "; ".join(out)
+    # Fallback: если OCR слипает несколько номеров в одной строке с разделителями.
+    for chunk in re.split(r"[,;/]|(?:\s{2,})", text):
+        cand = re.sub(r"\s+", " ", chunk).strip(" ,;")
+        if len(cand) < 6:
+            continue
+        if not re.search(r"\d{5,}", cand):
+            continue
+        if not re.search(r"(?:\+?\s*375|8-0?\d{2,4}|\(\s*0\d{2,4}\s*\)|\d{2,3}[\s\-]\d{2}[\s\-]\d{2})", cand):
+            continue
+        digits = re.sub(r"\D+", "", cand)
+        if not _phone_digits_reasonable(digits):
+            continue
+        if digits in seen_keys:
+            continue
+        seen_keys.add(digits)
+        out.append(cand)
+        if len(out) >= 12:
+            break
     return "; ".join(out)
 
 
 _BALLOT_RE = re.compile(r"[\u2610\u2611\u2612]")
 
 
-def infer_accepts_external_waste(object_blob: str) -> bool:
+def infer_accepts_external_waste(object_blob: str) -> bool | None:
     """
     В PDF реестра ecoinfo у строки «Объект» справа две колонки-галочки:
     «Использует собственные», «Принимает от других». Вторая — признак приёма чужих отходов.
 
     В плоском тексте это часто две подряд «☐/☑» (U+2610/U+2611) в конце строки с телефоном.
-    Если галочки в выгрузке не видны — True (полный реестр в БД; отбор «не принимает» — по явным ☐
-    и фразам). Поиск с расстоянием отсекает только записи с accepts_external_waste=False.
+    Нет явных галочек/фраз — None (неизвестно; для OCR/JPG без векторных галочек надёжность ниже).
+    Поиск с координатами показывает только записи с явным True.
     """
     text = (object_blob or "").replace("\xa0", " ")
     if not text.strip():
-        return True
+        return None
     pair: tuple[str, str] | None = None
     for line in text.splitlines():
         boxes = _BALLOT_RE.findall(line)
@@ -700,10 +1052,65 @@ def infer_accepts_external_waste(object_blob: str) -> bool:
         return False
     if re.search(r"принимает\s+отходы?\s+от\s+других", text, flags=re.IGNORECASE):
         return True
-    return True
+    return None
 
 
 _ZWSP_RE = re.compile(r"[\ufeff\u200b\u200c\u200d\u2060]")
+_PDF_NOISE_LINE_PATTERNS = (
+    re.compile(r"^\s*$"),
+    re.compile(r"^\s*Страница\s+\d+\s+из\s+\d+.*$", re.IGNORECASE),
+    re.compile(r"^\s*\d{1,2}\s+[а-яё]+\s+\d{4}\s*г\.?\s*$", re.IGNORECASE),
+    re.compile(r"^\s*\*+\s*$"),
+    re.compile(r"^\s*(?:Использует\s+собственные|Принимает\s+от\s+других)\s*$", re.IGNORECASE),
+    re.compile(r"^\s*Использует\s+собственные\s+Принимает\s+(?:от|он)\s+других\s*$", re.IGNORECASE),
+)
+_OCR_NORMALIZE_PATTERNS = (
+    # Common legal-form OCR confusions.
+    (re.compile(r"\b0ОО\b"), "ООО"),
+    (re.compile(r"\bО0О\b"), "ООО"),
+    (re.compile(r"\bОО0\b"), "ООО"),
+    (re.compile(r"\bОА0\b"), "ОАО"),
+    (re.compile(r"\b0А0\b"), "ОАО"),
+    # Punctuation spacing around address tokens.
+    (re.compile(r"\bг\s*[,;:]\s*"), "г. "),
+    (re.compile(r"\bул\s*[,;:]\s*"), "ул. "),
+    (re.compile(r"\bд\s*[,;:]\s*"), "д. "),
+)
+
+
+def _line_has_valuable_tokens(line: str) -> bool:
+    s = (line or "").strip()
+    if not s:
+        return False
+    if _fkko_line_parts(s):
+        return True
+    if OBJECT_START.search(s) or OWNER_START.search(s):
+        return True
+    if re.search(r"\b\d{6}\b", s):
+        return True
+    if re.search(r"(?:\+?\s*375|8-0?\d{2,4}|\(\s*0\d{2,4}\s*\)|\bтел\.?\b|\bфакс\b)", s, re.IGNORECASE):
+        return True
+    return False
+
+
+def _drop_pdf_noise_lines(text: str) -> str:
+    kept: list[str] = []
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if _line_has_valuable_tokens(s):
+            kept.append(s)
+            continue
+        if any(p.match(s) for p in _PDF_NOISE_LINE_PATTERNS):
+            continue
+        kept.append(s)
+    return "\n".join(kept)
+
+
+def _normalize_ocr_artifacts(text: str) -> str:
+    out = text or ""
+    for pat, repl in _OCR_NORMALIZE_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
 
 
 def _preprocess_registry_pdf_plaintext(full_text: str) -> str:
@@ -713,6 +1120,7 @@ def _preprocess_registry_pdf_plaintext(full_text: str) -> str:
     """
     full_text = _ZWSP_RE.sub("", full_text or "")
     full_text = full_text.replace("\r\n", "\n").replace("\r", "\n").replace("\x0c", "\n")
+    full_text = _normalize_ocr_artifacts(full_text)
     # «Объект» / «Object» и номер на разных строках (типичный вывод PDF).
     # Только короткий номер записи (≤5 цифр): иначе «Объект» + «220000, ул…» слипаются в ложный «Объект 220000».
     _obj_num_nl = re.compile(r"(?i)((?:Объект|[Oo]bject)\s*(?:№\.?))\s*\n\s*(\d{1,5})\b")
@@ -732,6 +1140,7 @@ def _preprocess_registry_pdf_plaintext(full_text: str) -> str:
         full_text,
     )
     full_text = re.sub(r"(?i)(?<!\n)\s+(?=Собственник\b)", "\n", full_text)
+    full_text = _drop_pdf_noise_lines(full_text)
     return full_text
 
 
@@ -739,6 +1148,76 @@ _FKKO_ANYWHERE = re.compile(r"(?<![0-9])([0-9]{7})(?![0-9])")
 _OBJ_ANCHOR = re.compile(
     r"(?i)(?<![а-яёa-zA-Z0-9])(?:Объект|[Oo]bject)\s*(?:№\.?)?\s*(\d{1,5})\b",
 )
+
+
+def registry_repair_source_excerpt(
+    full_text: str,
+    object_id: int,
+    waste_code: str | None,
+    *,
+    before: int = 3200,
+    after: int = 9000,
+    max_chars: int = 10_000,
+) -> str:
+    """
+    Фрагмент нормализованного текста PDF вокруг карточки «Объект N» для LLM-repair.
+    Используется, когда в распарсенной строке нет owner/phones — в candidates их не видно,
+    а в исходнике они часто есть выше/рядом с меткой объекта.
+    """
+    if not full_text or not str(full_text).strip():
+        return ""
+    try:
+        oid = int(object_id)
+    except (TypeError, ValueError):
+        return ""
+    if oid <= 0:
+        return ""
+
+    wc7: str | None = None
+    if waste_code:
+        w = str(waste_code).strip()
+        if len(w) == 7 and w.isdigit():
+            wc7 = w
+
+    anchored: list[int] = []
+    loose: list[int] = []
+    for m in _OBJ_ANCHOR.finditer(full_text):
+        try:
+            num = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        if num != oid:
+            continue
+        pos = int(m.start())
+        loose.append(pos)
+        if wc7:
+            fk = _last_fkko_span_before(full_text, pos)
+            if fk is not None and fk[0] == wc7:
+                anchored.append(pos)
+        else:
+            anchored.append(pos)
+
+    positions = anchored if anchored else loose
+    if not positions:
+        return ""
+
+    windows: list[tuple[int, int]] = []
+    for pos in positions:
+        s = max(0, pos - before)
+        e = min(len(full_text), pos + after)
+        windows.append((s, e))
+    windows.sort(key=lambda item: item[0])
+    merged: list[list[int]] = []
+    for s, e in windows:
+        if not merged or s > merged[-1][1] + 24:
+            merged.append([s, e])
+        else:
+            merged[-1][1] = max(merged[-1][1], e)
+    chunks = [full_text[s:e].strip() for s, e in merged]
+    out = "\n…\n".join(x for x in chunks if x)
+    if len(out) > max_chars:
+        return out[:max_chars].rstrip() + "\n…[clipped]"
+    return out
 
 
 def _last_fkko_span_before(text: str, end_pos: int, horizon: int = 14_000) -> tuple[str, int, int] | None:
@@ -781,6 +1260,7 @@ def _extract_address_by_postal_lines(*blobs: str) -> str:
                     and not re.search(r"\b\d{6}\b", nxt)
                     and not OWNER_START.match(nxt)
                     and not OBJECT_START.match(nxt)
+                    and not _PHONE_OR_FAX_RE.search(nxt)
                     and len(nxt) <= 140
                 ):
                     cand = f"{cand}, {nxt}"
@@ -788,6 +1268,195 @@ def _extract_address_by_postal_lines(*blobs: str) -> str:
             if len(cand) >= 10:
                 return cand
     return ""
+
+
+def _score_address_candidate(address: str) -> int:
+    s = re.sub(r"\s+", " ", (address or "").replace("\xa0", " ")).strip()
+    if not s:
+        return -1000
+    score = 0
+    if re.search(r"\b\d{6}\b", s):
+        score += 40
+    if _LOCALITY_RE.search(s):
+        score += 35
+    if _DISTRICT_RE.search(s):
+        score += 14
+    if _REGION_RE.search(s):
+        score += 14
+    if re.search(r"\b(?:ул\.|улица|пер\.|просп\.|б-р|шоссе|д\.|дом|корп\.|к\.)\b", s, flags=re.IGNORECASE):
+        score += 30
+    if len(s) >= 18:
+        score += min(20, len(s) // 15)
+    if re.search(r"(?:\+?\s*375|8-0?\d{2,4}|\(\s*0\d{2,4}\s*\)|\bтел\.?\b|\bфакс\b)", s, flags=re.IGNORECASE):
+        score -= 30
+    if "не указано" in s.casefold():
+        score -= 25
+    return score
+
+
+def _pick_best_address_candidate(*candidates: str) -> str:
+    scored = []
+    for cand in candidates:
+        c = re.sub(r"\s+", " ", (cand or "").replace("\xa0", " ")).strip(" ,;")
+        if not c:
+            continue
+        scored.append((c, _score_address_candidate(c)))
+    if not scored:
+        return ""
+    scored.sort(key=lambda item: (-item[1], -len(item[0]), item[0].casefold()))
+    return scored[0][0]
+
+
+def _best_address_line_from_blobs(*blobs: str) -> str:
+    best = ""
+    best_score = -10000
+    for blob in blobs:
+        for ln in (blob or "").replace("\xa0", " ").splitlines():
+            s = re.sub(r"\s+", " ", ln).strip(" ,;")
+            if len(s) < 8:
+                continue
+            score = _score_address_candidate(s)
+            if score > best_score:
+                best, best_score = s, score
+    return best
+
+
+def _normalize_address_for_scoring(address: str, *, owner_blob: str, object_blob: str) -> str:
+    s = _trim_tail_noise(address)
+    s = _ensure_locality_in_address(s, object_blob, owner_blob)
+    s = repair_registry_address(s, owner_blob, object_blob)
+    s = _dedupe_locality_in_address(s)
+    s = _dedupe_consecutive_comma_segments(s)
+    s = _canonicalize_address_from_components(s)
+    s = _clean_address_noise_final(s)
+    return s
+
+
+def _select_best_canonical_address(
+    primary: str,
+    alternative: str,
+    *,
+    owner_blob: str,
+    object_blob: str,
+) -> tuple[str, str]:
+    primary_norm = _normalize_address_for_scoring(primary, owner_blob=owner_blob, object_blob=object_blob)
+    alt_norm = _normalize_address_for_scoring(alternative, owner_blob=owner_blob, object_blob=object_blob)
+    p_score = _score_address_candidate(primary_norm)
+    a_score = _score_address_candidate(alt_norm)
+    if a_score > p_score:
+        return alt_norm, f"address_selected_alternative(score:{a_score}>{p_score})"
+    if p_score > a_score:
+        return primary_norm, f"address_selected_primary(score:{p_score}>{a_score})"
+    # Tie-breaker: prefer longer richer variant.
+    if len(alt_norm) > len(primary_norm):
+        return alt_norm, f"address_selected_alternative_by_length(len:{len(alt_norm)}>{len(primary_norm)})"
+    return primary_norm, f"address_selected_primary_by_length(len:{len(primary_norm)}>={len(alt_norm)})"
+
+
+def _score_owner_candidate(owner: str) -> int:
+    s = re.sub(r"\s+", " ", (owner or "").replace("\xa0", " ")).strip()
+    if not s:
+        return -1000
+    score = 10
+    if not _looks_like_owner_noise_value(s):
+        score += 55
+    if re.search(r"\b(?:ООО|ОАО|ЧУП|ИП|УП|ЗАО|ПАО)\b", s, flags=re.IGNORECASE):
+        score += 20
+    if re.search(r"[\"«»]", s):
+        score += 5
+    if len(s) >= 12:
+        score += min(15, len(s) // 8)
+    return score
+
+
+def _select_best_owner_candidate(primary: str, alternative: str) -> tuple[str, str]:
+    p = re.sub(r"\s+", " ", (primary or "").replace("\xa0", " ")).strip(" ,;")
+    a = re.sub(r"\s+", " ", (alternative or "").replace("\xa0", " ")).strip(" ,;")
+    p = re.sub(r"[`´‘’“”]", '"', p)
+    a = re.sub(r"[`´‘’“”]", '"', a)
+    p = _normalize_phrase_dashes(p)
+    a = _normalize_phrase_dashes(a)
+    if p and a:
+        p_low = p.casefold()
+        a_low = a.casefold()
+        if p_low in a_low and len(a) >= len(p) + 8:
+            return a, "owner_selected_alternative_contains_primary"
+        if a_low in p_low and len(p) >= len(a) + 8:
+            return p, "owner_selected_primary_contains_alternative"
+    p = _clean_owner_name_final(p)
+    a = _clean_owner_name_final(a)
+    p_score = _score_owner_candidate(p)
+    a_score = _score_owner_candidate(a)
+    if a_score > p_score:
+        return a, f"owner_selected_alternative(score:{a_score}>{p_score})"
+    if p_score > a_score:
+        return p, f"owner_selected_primary(score:{p_score}>{a_score})"
+    if len(a) > len(p):
+        return a, f"owner_selected_alternative_by_length(len:{len(a)}>{len(p)})"
+    return p, f"owner_selected_primary_by_length(len:{len(p)}>={len(a)})"
+
+
+def _score_object_candidate(object_name: str) -> int:
+    s = re.sub(r"\s+", " ", (object_name or "").replace("\xa0", " ")).strip()
+    if not s or s in {"—", "-"}:
+        return -1000
+    score = 20
+    if len(s) >= 8:
+        score += min(35, len(s) // 3)
+    if re.search(r"\b(?:установка|комплекс|площадка|полигон|линия|объект)\b", s, flags=re.IGNORECASE):
+        score += 18
+    if _is_registry_noise_line(s):
+        score -= 35
+    return score
+
+
+def _select_best_object_candidate(primary: str, alternative: str) -> tuple[str, str]:
+    p = re.sub(r"\s+", " ", (primary or "").replace("\xa0", " ")).strip(" ,;")
+    a = re.sub(r"\s+", " ", (alternative or "").replace("\xa0", " ")).strip(" ,;")
+    p_score = _score_object_candidate(p)
+    a_score = _score_object_candidate(a)
+    if a_score > p_score:
+        return a, f"object_selected_alternative(score:{a_score}>{p_score})"
+    if p_score > a_score:
+        return p, f"object_selected_primary(score:{p_score}>{a_score})"
+    if len(a) > len(p):
+        return a, f"object_selected_alternative_by_length(len:{len(a)}>{len(p)})"
+    return p, f"object_selected_primary_by_length(len:{len(p)}>={len(a)})"
+
+
+def _score_phones_candidate(phones: str) -> int:
+    s = re.sub(r"\s+", " ", (phones or "").replace("\xa0", " ")).strip()
+    if not s:
+        return -1000
+    items = [p.strip() for p in s.split(";") if p.strip()]
+    if not items:
+        return -1000
+    score = 10
+    for item in items:
+        digits = re.sub(r"\D+", "", item)
+        if _phone_digits_reasonable(digits):
+            score += 18
+        else:
+            score -= 10
+    if len(items) <= 4:
+        score += 8
+    if len(s) > 120:
+        score -= 10
+    return score
+
+
+def _select_best_phones_candidate(primary: str, alternative: str) -> tuple[str, str]:
+    p = re.sub(r"\s+", " ", (primary or "").replace("\xa0", " ")).strip(" ,;")
+    a = re.sub(r"\s+", " ", (alternative or "").replace("\xa0", " ")).strip(" ,;")
+    p_score = _score_phones_candidate(p)
+    a_score = _score_phones_candidate(a)
+    if a_score > p_score:
+        return a, f"phones_selected_alternative(score:{a_score}>{p_score})"
+    if p_score > a_score:
+        return p, f"phones_selected_primary(score:{p_score}>{a_score})"
+    if len(a) > len(p):
+        return a, f"phones_selected_alternative_by_length(len:{len(a)}>{len(p)})"
+    return p, f"phones_selected_primary_by_length(len:{len(p)}>={len(a)})"
 
 
 def _build_registry_record_row(
@@ -811,16 +1480,13 @@ def _build_registry_record_row(
             or (can_hint and len(canonical) > len(object_name))
         ):
             object_name = canonical
+    object_name = _clean_object_name_final(object_name, waste_type_name)
     _oname2, addr_own = extract_name_address_multiline(owner_blob)
-    address = addr_obj or addr_own or owner_blob
-    address = _trim_tail_noise(address)
+    postal_fallback = _extract_address_by_postal_lines(object_blob, owner_blob)
+    address = _pick_best_address_candidate(addr_obj, addr_own, postal_fallback, owner_blob)
     if len(address) < 8:
-        address = _extract_address_by_postal_lines(object_blob, owner_blob) or (addr_obj or addr_own or owner_blob)
-    address = _ensure_locality_in_address(address, object_blob, owner_blob)
-    address = repair_registry_address(address, owner_blob, object_blob)
-    address = _dedupe_locality_in_address(address)
-    address = _dedupe_consecutive_comma_segments(address)
-    address = _clean_address_noise_final(address)
+        address = _pick_best_address_candidate(postal_fallback, addr_obj, addr_own, owner_blob)
+    address = _normalize_address_for_scoring(address, owner_blob=owner_blob, object_blob=object_blob)
 
     if not _LOCALITY_RE.search(address):
         pm = re.search(r"\b(\d{6})\b", address)
@@ -835,11 +1501,26 @@ def _build_registry_record_row(
             )
             address = re.sub(r",\s*,", ",", address)
             address = re.sub(r"[,\s]+$", "", address).strip()
+    address = _canonicalize_address_from_components(address)
     address = _clean_address_noise_final(address)
     owner_name = owner_display_name(owner_blob, object_blob, address)
+    owner_name = _clean_owner_name_final(owner_name)
+
+    # Частый OCR-кейс: адрес распознан только как индекс, а город прилип к object/owner.
+    if re.fullmatch(r"\d{6}", address or ""):
+        city_hint = (
+            _extract_trailing_city_word(object_name)
+            or _extract_trailing_city_word(owner_name)
+            or _extract_trailing_city_word(object_blob)
+            or _extract_trailing_city_word(owner_blob)
+        )
+        if city_hint:
+            address = f"{address}, г. {city_hint}"
+            object_name = _strip_trailing_city_word(object_name, city_hint)
+            owner_name = _strip_trailing_city_word(owner_name, city_hint)
 
     phones = extract_phones_from_text(object_blob, owner_blob)
-    return {
+    row = {
         "id": reg_id,
         "owner": owner_name,
         "object_name": object_name or "—",
@@ -850,6 +1531,179 @@ def _build_registry_record_row(
         "phones": phones,
         "source_part": source_part,
     }
+    conf, notes = _compute_parse_confidence(
+        row,
+        raw_object_blob=object_blob,
+        raw_owner_blob=owner_blob,
+    )
+    if conf < 60:
+        repaired = _repair_low_confidence_row(
+            dict(row),
+            object_blob=object_blob,
+            owner_blob=owner_blob,
+            waste_type_name=waste_type_name,
+        )
+        r_conf, r_notes = _compute_parse_confidence(
+            repaired,
+            raw_object_blob=object_blob,
+            raw_owner_blob=owner_blob,
+        )
+        if r_conf > conf:
+            repair_notes = repaired.pop("__repair_notes", [])
+            row = repaired
+            conf, notes = r_conf, r_notes
+            notes = [*notes, "repair_pass_applied"]
+            if repair_notes:
+                notes.extend([str(n) for n in repair_notes if n])
+    row["parse_confidence"] = conf
+    row["parse_notes"] = notes
+    return row
+
+
+def _repair_low_confidence_row(
+    row: dict[str, Any],
+    *,
+    object_blob: str,
+    owner_blob: str,
+    waste_type_name: str,
+) -> dict[str, Any]:
+    out = dict(row)
+    repair_notes: list[str] = []
+    obj_blob = (object_blob or "").strip()
+    own_blob = (owner_blob or "").strip()
+
+    # Owner repair: prefer canonical or hint extraction from wider context.
+    owner_now = str(out.get("owner") or "").strip()
+    owner_alt = _select_canonical_owner_name(own_blob) or _extract_owner_hint_from_text(
+        f"{own_blob} ; {obj_blob} ; {out.get('address') or ''}"
+    )
+    selected_owner, owner_note = _select_best_owner_candidate(owner_now, owner_alt or "")
+    if selected_owner:
+        out["owner"] = selected_owner
+        repair_notes.append(owner_note)
+    elif not str(out.get("owner") or "").strip():
+        fb = clean_owner_blob(_owner_blob_body_for_name_address(own_blob))
+        if (
+            fb
+            and len(fb) >= 10
+            and (_OWNER_HINT_RE.search(fb) or _OWNER_ORG_HINT_RE.search(fb))
+            and not _looks_like_owner_noise_value(fb)
+        ):
+            out["owner"] = re.sub(r"\s+", " ", fb)[:400]
+            repair_notes.append("owner_repair_fallback_clean_blob")
+
+    # Object repair: try stronger canonical selection from object blob.
+    obj_now = str(out.get("object_name") or "").strip()
+    obj_alt = _select_canonical_object_name(obj_blob, waste_type_name) or ""
+    selected_obj, obj_note = _select_best_object_candidate(obj_now, obj_alt)
+    if selected_obj:
+        out["object_name"] = selected_obj
+        repair_notes.append(obj_note)
+
+    # Address repair: pick best candidate from all available signals and sanitize.
+    addr_now = str(out.get("address") or "").strip()
+    addr_alt = _pick_best_address_candidate(
+        addr_now,
+        _extract_address_by_postal_lines(obj_blob, own_blob),
+        _best_address_line_from_blobs(obj_blob, own_blob),
+        _extract_address_hint(obj_blob) or "",
+        _extract_address_hint(own_blob) or "",
+    )
+    selected_addr, selected_note = _select_best_canonical_address(
+        addr_now,
+        addr_alt,
+        owner_blob=own_blob,
+        object_blob=obj_blob,
+    )
+    if selected_addr:
+        out["address"] = selected_addr
+        repair_notes.append(selected_note)
+
+    # Phones repair: include address in fallback source for split lines.
+    phones_now = str(out.get("phones") or "").strip()
+    phones_alt = extract_phones_from_text(obj_blob, own_blob, str(out.get("address") or ""))
+    selected_phones, phones_note = _select_best_phones_candidate(phones_now, phones_alt)
+    if selected_phones:
+        out["phones"] = selected_phones
+        repair_notes.append(phones_note)
+
+    if repair_notes:
+        out["__repair_notes"] = repair_notes
+
+    return out
+
+
+def _compute_parse_confidence(
+    row: dict[str, Any],
+    *,
+    raw_object_blob: str,
+    raw_owner_blob: str,
+) -> tuple[int, list[str]]:
+    score = 100
+    notes: list[str] = []
+
+    waste_code = str(row.get("waste_code") or "").strip()
+    if not re.fullmatch(r"\d{7}", waste_code):
+        score -= 30
+        notes.append("bad_waste_code")
+
+    try:
+        reg_id = int(row.get("id") or 0)
+        if reg_id <= 0:
+            raise ValueError
+    except Exception:
+        score -= 20
+        notes.append("bad_object_id")
+
+    object_name = str(row.get("object_name") or "").strip()
+    if object_name in {"", "—", "-"}:
+        score -= 20
+        notes.append("object_placeholder")
+    elif len(object_name) < 8:
+        score -= 6
+        notes.append("short_object_name")
+
+    owner = str(row.get("owner") or "").strip()
+    if not owner:
+        score -= 20
+        notes.append("owner_empty")
+    elif _looks_like_owner_noise_value(owner):
+        score -= 12
+        notes.append("owner_looks_noisy")
+
+    address = str(row.get("address") or "").strip()
+    if not address:
+        score -= 22
+        notes.append("address_empty")
+    else:
+        if not re.search(r"\b\d{6}\b", address):
+            score -= 6
+            notes.append("address_no_postal")
+        if not _LOCALITY_RE.search(address):
+            score -= 10
+            notes.append("address_no_locality")
+        if _PHONE_OR_FAX_RE.search(address):
+            score -= 8
+            notes.append("address_contains_phone")
+
+    phones = str(row.get("phones") or "").strip()
+    if not phones:
+        score -= 8
+        notes.append("phones_empty")
+    elif len(phones) > 120:
+        score -= 5
+        notes.append("phones_too_long")
+
+    # If parser only got tiny blobs around anchors, confidence should be lower.
+    if len((raw_object_blob or "").strip()) < 10:
+        score -= 8
+        notes.append("short_object_blob")
+    if len((raw_owner_blob or "").strip()) < 4:
+        score -= 4
+        notes.append("short_owner_blob")
+
+    score = max(0, min(100, int(score)))
+    return score, notes
 
 
 def _parse_object_owner_lines(lines: list[str]) -> tuple[str, str]:
@@ -861,6 +1715,11 @@ def _parse_object_owner_lines(lines: list[str]) -> tuple[str, str]:
     if not mobj:
         return "", ""
     tail = first[mobj.end() :].strip()
+    owner_inline = ""
+    inline_m = _INLINE_OWNER_SPLIT_RE.search(tail)
+    if inline_m:
+        owner_inline = tail[inline_m.end() :].strip()
+        tail = tail[: inline_m.start()].strip()
     j = 1
     obj_chunks = [tail]
     while j < len(lines):
@@ -900,6 +1759,10 @@ def _parse_object_owner_lines(lines: list[str]) -> tuple[str, str]:
                 own_chunks.append(stn)
                 j += 1
             owner_blob = "\n".join(x for x in own_chunks if x).strip()
+    if not owner_blob and owner_inline:
+        owner_blob = owner_inline
+    elif owner_blob and owner_inline:
+        owner_blob = "\n".join(x for x in [owner_inline, owner_blob] if x).strip()
     return object_blob, owner_blob
 
 
@@ -975,7 +1838,9 @@ _OWNER_HINT_RE = re.compile(
 _OWNER_ORG_HINT_RE = re.compile(
     r"(?:^|[^A-Za-zА-Яа-яЁё])(?:"
     r"филиал(?:а|ы|у|ом|е)?|управлени[ея]|трест(?:а|у|ом|е)?|комбинат(?:а|у|ом|е)?|завод(?:а|у|ом|е)?|"
-    r"предприят\w*|организац\w*|компан\w*|дирекц\w*|объединени\w*|концерн\w*|холдинг\w*|служб\w*"
+    r"предприят\w*|организац\w*|компан\w*|дирекц\w*|объединени\w*|концерн\w*|холдинг\w*|служб\w*|"
+    r"муниципал\w*|райпотреб\w*|потребсоюз\w*|кооператив\w*|ассоциац\w*|"
+    r"учреждени\w*|акционерн\w*|унитарн\w*|государственн\w*"
     r")(?=$|[^A-Za-zА-Яа-яЁё])",
     re.IGNORECASE,
 )
@@ -992,7 +1857,7 @@ def _guess_owner_blob_from_lines(lines: list[str]) -> str:
         s = (ln or "").strip()
         if not s:
             continue
-        if not _OWNER_HINT_RE.search(s):
+        if not (_OWNER_HINT_RE.search(s) or _OWNER_ORG_HINT_RE.search(s)):
             continue
         parts = [s]
         j = i + 1
@@ -1007,6 +1872,8 @@ def _guess_owner_blob_from_lines(lines: list[str]) -> str:
             if re.fullmatch(r"\d{3,6}", nxt) or re.fullmatch(r"\d{7}", nxt):
                 break
             if re.search(r"\b\d{6}\b", nxt):
+                break
+            if _PHONE_OR_FAX_RE.search(nxt):
                 break
             if len(" ".join(parts + [nxt])) > 280:
                 break
@@ -1169,19 +2036,37 @@ def _parse_registry_label_blocks(lines: list[str], source_part: int) -> list[dic
     return out
 
 
-def iter_registry_plain_text(full_text: str, source_part: int) -> Iterator[dict[str, Any]]:
+def preprocess_registry_plaintext(full_text: str) -> str:
+    """
+    Тяжёлая нормализация «сырого» текста PDF перед разбором.
+    Вызывайте отдельно и передайте в iter_registry_plain_text(..., text_preprocessed=True),
+    чтобы UI/джоб могли показать прогресс между извлечением страниц и разбором строк.
+    """
+    return _preprocess_registry_pdf_plaintext(full_text)
+
+
+def iter_registry_plain_text(
+    full_text: str,
+    source_part: int,
+    *,
+    text_preprocessed: bool = False,
+) -> Iterator[dict[str, Any]]:
     """
     Потоковый разбор текста реестра: отдаёт записи по мере готовности.
     Удобно для импорта больших файлов без накопления промежуточных структур в памяти.
+
+    text_preprocessed: если True, full_text уже прошёл preprocess_registry_plaintext.
     """
-    full_text = _preprocess_registry_pdf_plaintext(full_text)
+    if not text_preprocessed:
+        full_text = _preprocess_registry_pdf_plaintext(full_text)
     lines = full_text.splitlines()
     while lines and _fkko_line_parts(lines[0].strip()) is None:
         lines.pop(0)
 
     emitted = False
 
-    def _iter_rows_from_segment(seg: list[str]) -> Iterator[dict[str, Any]]:
+    # Pass 1: split by FKKO and extract structured segments.
+    def _iter_structured_segments(seg: list[str]) -> Iterator[dict[str, Any]]:
         if not seg:
             return
         first = seg[0].strip()
@@ -1211,74 +2096,75 @@ def iter_registry_plain_text(full_text: str, source_part: int) -> Iterator[dict[
             j += 1
             obj_chunks = [tail]
             while j < len(remainder):
-                nxt = remainder[j]
-                stn = nxt.strip()
-                if OBJECT_START.match(stn) or _fkko_line_parts(stn):
-                    break
-                if OWNER_START.match(stn):
+                stn = remainder[j].strip()
+                if OBJECT_START.match(stn) or _fkko_line_parts(stn) or OWNER_START.match(stn):
                     break
                 obj_chunks.append(stn)
                 j += 1
             object_blob = "\n".join(x for x in obj_chunks if x).strip()
 
-            if j >= len(remainder):
-                owner_blob = ""
-            else:
-                found_owner = False
-                while j < len(remainder):
-                    stn = remainder[j].strip()
-                    if not stn:
-                        j += 1
-                        continue
-                    if OWNER_START.match(stn):
-                        found_owner = True
-                        break
-                    if OBJECT_START.match(stn) or _fkko_line_parts(stn):
-                        break
-                    j += 1
-                if found_owner and j < len(remainder):
-                    owm = OWNER_START.match(remainder[j].strip())
-                    if owm:
-                        own_tail = owm.group(1).strip()
-                        j += 1
-                        own_chunks = [own_tail]
-                        while j < len(remainder):
-                            stn = remainder[j].strip()
-                            if OBJECT_START.match(stn) or _fkko_line_parts(stn):
-                                break
-                            own_chunks.append(stn)
-                            j += 1
-                        owner_blob = "\n".join(x for x in own_chunks if x).strip()
-                    else:
-                        owner_blob = ""
-                else:
-                    owner_blob = ""
+            owner_blob = ""
+            found_owner = False
+            jj = j
+            while jj < len(remainder):
+                stn = remainder[jj].strip()
+                if not stn:
+                    jj += 1
+                    continue
+                if OWNER_START.match(stn):
+                    found_owner = True
+                    break
+                if OBJECT_START.match(stn) or _fkko_line_parts(stn):
+                    break
+                jj += 1
+            if found_owner and jj < len(remainder):
+                owm = OWNER_START.match(remainder[jj].strip())
+                if owm:
+                    own_tail = owm.group(1).strip()
+                    jj += 1
+                    own_chunks = [own_tail]
+                    while jj < len(remainder):
+                        stn = remainder[jj].strip()
+                        if OBJECT_START.match(stn) or _fkko_line_parts(stn):
+                            break
+                        own_chunks.append(stn)
+                        jj += 1
+                    owner_blob = "\n".join(x for x in own_chunks if x).strip()
+                    j = jj
 
-            yield _build_registry_record_row(
-                reg_id,
-                waste_code,
-                waste_type_name,
-                object_blob,
-                owner_blob,
-                source_part,
-            )
+            yield {
+                "reg_id": reg_id,
+                "waste_code": waste_code,
+                "waste_type_name": waste_type_name,
+                "object_blob": object_blob,
+                "owner_blob": owner_blob,
+            }
 
+    segments: list[dict[str, Any]] = []
     cur: list[str] = []
     for line in lines:
         st = line.strip()
         if _fkko_line_parts(st):
             if cur:
-                for row in _iter_rows_from_segment(cur):
-                    emitted = True
-                    yield row
+                segments.extend(_iter_structured_segments(cur))
             cur = [line]
             continue
         if cur:
             cur.append(line)
     if cur:
-        for row in _iter_rows_from_segment(cur):
-            emitted = True
-            yield row
+        segments.extend(_iter_structured_segments(cur))
+
+    # Pass 2: extract fields from structured segments.
+    for seg in segments:
+        emitted = True
+        yield _build_registry_record_row(
+            int(seg["reg_id"]),
+            str(seg["waste_code"]),
+            str(seg["waste_type_name"]),
+            str(seg["object_blob"]),
+            str(seg["owner_blob"]),
+            source_part,
+        )
     if not emitted and len(full_text) > 12_000:
         fb = _parse_registry_anchor_fallback(full_text, source_part)
         if fb:
@@ -1294,4 +2180,4 @@ def parse_registry_plain_text(full_text: str, source_part: int) -> list[dict[str
     """
     Совместимость со старым API: возвращает список записей.
     """
-    return list(iter_registry_plain_text(full_text, source_part))
+    return list(iter_registry_plain_text(full_text, source_part, text_preprocessed=False))

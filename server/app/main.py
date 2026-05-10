@@ -1,15 +1,22 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings
-from app.routers import admin, auth, geocode, objects, pdf, registry
-from app.services.auth_users import ensure_bootstrap_owner_account
+from app.core.config import settings
+from app.infra.app_logging import configure_app_logging
+from app.domains.auth.service import ensure_bootstrap_owner_account
+from app.routers.admin import router as admin_router
+from app.routers.auth import router as auth_router
+from app.routers.geocode import router as geocode_router
+from app.routers.objects import router as objects_router
+from app.routers.pdf import router as pdf_router
+from app.routers.registry import router as registry_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_app_logging()
     if settings.bootstrap_owner_email and settings.bootstrap_owner_password:
         ensure_bootstrap_owner_account(
             settings.bootstrap_owner_email,
@@ -30,12 +37,14 @@ if settings.cors_origin_regex:
     _cors_kw["allow_origin_regex"] = settings.cors_origin_regex
 app.add_middleware(CORSMiddleware, **_cors_kw)
 
-app.include_router(auth.router, prefix="/api/v1")
-app.include_router(admin.router, prefix="/api/v1")
-app.include_router(objects.router, prefix="/api/v1")
-app.include_router(geocode.router, prefix="/api/v1")
-app.include_router(pdf.router, prefix="/api/v1")
-app.include_router(registry.router, prefix="/api/v1")
+_auth_admin = APIRouter()
+_auth_admin.include_router(auth_router)
+_auth_admin.include_router(admin_router)
+app.include_router(_auth_admin, prefix="/api/v1")
+app.include_router(objects_router, prefix="/api/v1")
+app.include_router(geocode_router, prefix="/api/v1")
+app.include_router(pdf_router, prefix="/api/v1")
+app.include_router(registry_router, prefix="/api/v1")
 
 
 @app.get("/health")

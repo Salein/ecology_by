@@ -3,7 +3,12 @@ FROM python:3.12-slim-bookworm
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && apt-get install -y --no-install-recommends \
+        gcc \
+        libc6-dev \
+        tesseract-ocr \
+        tesseract-ocr-rus \
+        tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

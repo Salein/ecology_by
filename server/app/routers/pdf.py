@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
-from app.deps import get_current_user
+from app.core.security import get_current_user
 from app.schemas import PdfExtractResponse
-from app.services.auth_users import UserRecord
+from app.domains.auth.service import UserRecord
 from app.services.pdf_extract import extract_pdf_bytes
 
 router = APIRouter(prefix="/pdf", tags=["pdf"])

@@ -4,6 +4,13 @@ from app.schemas import ObjectSearchRequest
 from app.services import object_search as search
 
 
+def test_row_accepts_external_waste_only_explicit_true() -> None:
+    assert search._row_accepts_external_waste({"accepts_external_waste": True}) is True
+    assert search._row_accepts_external_waste({"accepts_external_waste": False}) is False
+    assert search._row_accepts_external_waste({"accepts_external_waste": None}) is False
+    assert search._row_accepts_external_waste({}) is False
+
+
 def test_search_without_location_returns_limited_unique(monkeypatch) -> None:
     rows = [
         {

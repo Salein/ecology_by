@@ -2,9 +2,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.deps import require_admin
+from app.core.security import require_admin
 from app.schemas import UserAdminUpdate, UserOut
-from app.services.auth_users import (
+from app.domains.auth.service import (
     UserRecord,
     delete_user,
     get_user_by_id,

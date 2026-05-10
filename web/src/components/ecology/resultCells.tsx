@@ -35,23 +35,9 @@ export function OwnerCell({ row }: { row: WasteObjectRow }) {
 
 export function ObjectCell({ row }: { row: WasteObjectRow }) {
   const fullObjectName = formatObjectNameDisplay(row.object_name, row.waste_type_name);
-  const isLong = fullObjectName.length > 90;
   return (
     <div className="flex min-w-0 flex-col gap-2 rounded-xl border border-emerald-100/70 bg-emerald-50/70 px-4 py-3 text-sm leading-snug text-stone-800 break-words">
-      <span
-        className="min-w-0"
-        title={fullObjectName}
-        style={
-          isLong
-            ? {
-                display: "-webkit-box",
-                WebkitLineClamp: 4,
-                WebkitBoxOrient: "vertical",
-                overflow: "hidden",
-              }
-            : undefined
-        }
-      >
+      <span className="min-w-0 whitespace-normal" title={fullObjectName}>
         {fullObjectName}
       </span>
     </div>

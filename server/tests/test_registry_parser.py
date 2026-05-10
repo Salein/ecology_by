@@ -1,7 +1,14 @@
 """Минимальные проверки парсера реестра (без PDF)."""
 
 from app.services.registry_record_parser import (
+    _select_best_canonical_address,
+    _select_best_object_candidate,
+    _select_best_owner_candidate,
+    _select_best_phones_candidate,
+    extract_phones_from_text,
+    infer_accepts_external_waste,
     iter_registry_plain_text,
+    owner_display_name,
     _parse_registry_anchor_fallback,
     _preprocess_registry_pdf_plaintext,
     parse_registry_plain_text,
@@ -22,6 +29,23 @@ def test_parse_minimal_segment():
     assert rows[0]["id"] == 1
     assert rows[0]["waste_code"] == "1111111"
     assert "Минск" in (rows[0].get("address") or "")
+    assert rows[0].get("accepts_external_waste") is None
+
+
+def test_infer_accepts_external_waste_unknown_without_markers():
+    assert infer_accepts_external_waste("") is None
+    assert infer_accepts_external_waste("   ") is None
+    assert infer_accepts_external_waste("ООО Овощ без галочек") is None
+
+
+def test_infer_accepts_external_waste_ballot_second_column():
+    assert infer_accepts_external_waste("тел. ☑ ☐") is False
+    assert infer_accepts_external_waste("тел. ☑ ☑") is True
+
+
+def test_infer_accepts_external_waste_phrases():
+    assert infer_accepts_external_waste("не принимает от других") is False
+    assert infer_accepts_external_waste("принимает отходы от других") is True
 
 
 def test_iter_parser_matches_list_parser():
@@ -350,6 +374,53 @@ def test_owner_name_supports_additional_legal_forms():
     assert rows[0].get("owner") == 'КУП "Горремавтодор"'
 
 
+def test_owner_display_name_after_standalone_sobstvennik_line():
+    name = owner_display_name("Собственник\nООО «Мира»", "", "")
+    assert "ООО" in name
+    assert "Мира" in name
+
+
+def test_extract_phones_mob_label():
+    t = "моб. +375 (29) 555-66-77 офис"
+    phones = extract_phones_from_text(t)
+    assert "375" in phones
+    assert "555" in phones or "66-77" in phones
+
+
+def test_extract_phones_merge_plus375_split_across_lines():
+    t = "+375 (29)\n563-38-19"
+    phones = extract_phones_from_text(t)
+    assert "375" in phones
+    assert "563" in phones
+
+
+def test_extract_phones_telefon_colon_without_dot():
+    t = "тел: +375 (29) 555-66-77 справки"
+    phones = extract_phones_from_text(t)
+    assert "375" in phones
+
+
+def test_bare_city_after_postal_gets_g_prefix_in_ensure_locality():
+    from app.services.registry_record_parser import _ensure_locality_in_address
+
+    addr = _ensure_locality_in_address(
+        "220030, \u041c\u0438\u043d\u0441\u043a, \u0443\u043b. \u041f\u043e\u0431\u0435\u0434\u044b, \u0434. 1",
+        "",
+        "",
+    )
+    assert "\u0433." in addr
+    assert "\u041c\u0438\u043d\u0441\u043a" in addr
+
+
+def test_owner_canonical_from_naimenovanie_line():
+    from app.services.registry_record_parser import _select_canonical_owner_name
+
+    blob = """Собственник
+Наименование организации: ООО «Ромашка плюс»
+"""
+    assert "Ромашка" in (_select_canonical_owner_name(blob) or "")
+
+
 def test_owner_name_fallback_from_object_blob_when_owner_empty():
     text = """
 1111111 Бой бетонных изделий
@@ -363,3 +434,295 @@ def test_owner_name_fallback_from_object_blob_when_owner_empty():
     owner = rows[0].get("owner") or ""
     assert "ОАО" in owner
     assert "комбинат ЖБК" in owner
+
+
+def test_preprocess_drops_header_noise_lines():
+    text = """
+Страница 14 из 1999
+22 апреля 2026 г.
+1111111 Вид отхода
+Объект 103 Установка
+220000, ул. Примерная, 1, г. Минск
+Собственник ООО "Тест"
+220000, ул. Примерная, 1, г. Минск
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    assert rows[0]["id"] == 103
+    assert rows[0]["waste_code"] == "1111111"
+
+
+def test_ocr_table_header_noise_line_with_prinimaet_on_drugih_is_ignored():
+    text = """
+Реестр объектов
+Использует собственные Принимает он других
+1110100 Зачистки от производства твердых сыров
+Объект 3245Коммунальное производственное унитарное предприятие
+224008, ул. Ковельская, д.1, г. Брест 8 (0162) 59 39 54
+Собственник Коммунальное производственное унитарное предприятие
+224008, ул. Ковельская, д.1, г. Брест (0162) 59 39 55
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["waste_code"] == "1110100"
+    assert row["id"] == 3245
+    assert "Ковельская" in (row.get("address") or "")
+
+
+def test_ocr_brest_sample_owner_object_address_cleanup():
+    text = """
+1110100 Зачистки от производства твердых сыров
+Объект 3245 Коммунальное производственное — унитарное предприятие "Брестский мусороперерабатывающий завод"
+224008, г. Брест, г. Брест, ул. Ковельская, д. 1 (0162) 59 39 55
+Собственник унитарное предприятие "Брестский мусороперерабатывающий завод"
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    row = rows[0]
+    owner = row.get("owner") or ""
+    obj = row.get("object_name") or ""
+    addr = row.get("address") or ""
+    assert "унитарное предприятие" in owner.casefold()
+    assert "коммунальное производственное" in obj.casefold() or "мусороперерабатывающий" in obj.casefold()
+    assert "г. Брест, г. Брест" not in addr
+    assert "Ковельская" in addr
+
+
+def test_owner_and_object_do_not_keep_address_or_phone_tail():
+    text = """
+1110400 Остатки пряностей
+Объект 1199 Котел Kalvis 950 (котельная Осиповичского ГУ) г. Осиповичи, ул. Калинина +375 (225) 23-962
+Собственник ОАО "Бобруйский КХП" г. Бобруйск, Могилевская обл. +375 (225) 68-964
+213824, г. Осиповичи, ул. Калинина
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    row = rows[0]
+    obj = (row.get("object_name") or "").casefold()
+    owner = (row.get("owner") or "").casefold()
+    assert "ул." not in obj
+    assert "г. осиповичи" not in obj
+    assert "ул." not in owner
+    assert "г. бобруйск" not in owner
+
+
+def test_extract_phones_keeps_multiple_numbers_from_same_line():
+    t = '+375 (225) 23-962, +375 (225) 68-964'
+    phones = extract_phones_from_text(t)
+    assert "23-962" in phones or "23962" in phones
+    assert "68-964" in phones or "68964" in phones
+
+
+def test_postal_only_address_moves_city_from_object_tail():
+    text = """
+1110500 Отходы зерновые
+Объект 3176 Цех гранулирования растительного сырья Бобруйск
+Собственник ООО "Экогран Пром Плюс" Бобруйск
+213824
+"""
+    rows = parse_registry_plain_text(text, 2)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.get("address") == "213824, г. Бобруйск"
+    assert not (row.get("object_name") or "").casefold().endswith("бобруйск")
+
+
+def test_address_candidate_prefers_structured_address():
+    text = """
+1111111 Вид
+Объект 104 Комплекс
+минская область
+220020, г. Минск, ул. Тимирязева, 97-11
+Собственник ООО "ЭкоРесурс"
+220020, г. Минск, ул. Тимирязева, 97-11
+тел. +375 (29) 111-22-33
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    addr = rows[0].get("address") or ""
+    assert "220020" in addr
+    assert "Тимирязева" in addr
+
+
+def test_object_line_with_inline_owner_split():
+    text = """
+1111111 Вид
+Объект 105 Мобильная установка Собственник ООО "ЭкоТест"
+220020, г. Минск, ул. Тимирязева, 97-11
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    assert rows[0]["id"] == 105
+    assert "Мобильная установка" in (rows[0].get("object_name") or "")
+    assert "ООО" in (rows[0].get("owner") or "")
+
+
+def test_owner_guess_supports_org_hint_without_legal_form():
+    text = """
+1111111 Вид
+Объект 106 Дробильно-сортировочная установка
+220020, г. Минск, ул. Тимирязева, 97-11
+Собственник
+дорожно-строительный трест Центральный
+220020, г. Минск, ул. Тимирязева, 97-11
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    owner = rows[0].get("owner") or ""
+    assert "трест" in owner.casefold()
+
+
+def test_parse_confidence_present_and_high_for_clean_row():
+    text = """
+1111111 Вид
+Объект 107 Мобильная дробильно-сортировочная установка
+220020, г. Минск, ул. Тимирязева, 97-11
+Собственник ООО "ЭкоРесурс"
+220020, г. Минск, ул. Тимирязева, 97-11
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    row = rows[0]
+    assert isinstance(row.get("parse_confidence"), int)
+    assert row["parse_confidence"] >= 70
+    assert isinstance(row.get("parse_notes"), list)
+
+
+def test_ocr_normalization_restores_legal_form():
+    text = """
+1111111 Вид
+Объект 108 Установка
+220020, г, Минск, ул, Тимирязева, 97-11
+Собственник 0ОО "ЭкоРесурс"
+220020, г, Минск, ул, Тимирязева, 97-11
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    owner = rows[0].get("owner") or ""
+    assert "ООО" in owner
+    addr = rows[0].get("address") or ""
+    assert "г." in addr
+    assert "ул." in addr
+
+
+def test_repair_pass_improves_confidence_for_sparse_owner_line():
+    text = """
+1111111 Вид
+Объект 109 Мобильная установка
+220020, г. Минск, ул. Тимирязева, 97-11
+Собственник
+дорожно-строительный трест Западный
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.get("parse_confidence", 0) >= 60
+    notes = row.get("parse_notes") or []
+    assert isinstance(notes, list)
+
+
+def test_two_pass_parsing_multiple_objects_in_one_fkko_segment():
+    text = """
+1111111 Вид отхода
+Объект 201 Установка А
+220000, г. Минск, ул. А, 1
+Собственник ООО "Альфа"
+220000, г. Минск, ул. А, 1
+Объект 202 Установка Б
+220001, г. Минск, ул. Б, 2
+Собственник ООО "Бета"
+220001, г. Минск, ул. Б, 2
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 2
+    ids = sorted(int(r["id"]) for r in rows)
+    assert ids == [201, 202]
+
+
+def test_address_component_canonicalization_keeps_core_fields():
+    text = """
+1111111 Вид
+Объект 301 Комплекс
+220020, г. Минск, ул. Тимирязева, д. 97-11, корпус 2
+Собственник ООО "ЭкоРесурс"
+220020, г. Минск, ул. Тимирязева, д. 97-11
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    addr = rows[0].get("address") or ""
+    assert "220020" in addr
+    assert "г. Минск" in addr
+    assert "ул. Тимирязева" in addr
+    assert "д. 97-11" in addr
+
+
+def test_address_component_canonicalization_keeps_region_and_district():
+    text = """
+1111111 Вид
+Объект 302 Комплекс
+220020, г. Минск, Минский р-н, Минская обл., ул. Тимирязева, д. 97-11
+Собственник ООО "ЭкоРесурс"
+220020, г. Минск, Минский р-н, Минская обл., ул. Тимирязева, д. 97-11
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    addr = rows[0].get("address") or ""
+    assert "Минский р-н" in addr
+    assert "Минская обл." in addr
+
+
+def test_low_conf_repair_uses_best_address_line_from_blobs():
+    text = """
+1111111 Вид
+Объект 303 Комплекс
+Минская обл.
+Собственник ООО "Тест"
+220020, г. Минск, ул. Тимирязева, д. 97-11
+"""
+    rows = parse_registry_plain_text(text, 1)
+    assert len(rows) == 1
+    addr = rows[0].get("address") or ""
+    assert "220020" in addr
+    assert "Тимирязева" in addr
+
+
+def test_select_best_canonical_address_prefers_alternative_by_score():
+    primary = "Минская обл."
+    alternative = "220020, г. Минск, Минская обл., ул. Тимирязева, д. 97-11"
+    chosen, note = _select_best_canonical_address(
+        primary,
+        alternative,
+        owner_blob="Собственник ООО Тест",
+        object_blob="Объект 1",
+    )
+    assert "220020" in chosen
+    assert "г. Минск" in chosen
+    assert note.startswith("address_selected_alternative")
+
+
+def test_select_best_owner_candidate_prefers_alternative():
+    chosen, note = _select_best_owner_candidate(
+        "г. Минск, ул. Тестовая, 1",
+        'ООО "ЭкоРесурс"',
+    )
+    assert "ООО" in chosen
+    assert note.startswith("owner_selected_alternative")
+
+
+def test_select_best_object_candidate_prefers_informative_name():
+    chosen, note = _select_best_object_candidate(
+        "—",
+        "Мобильная дробильно-сортировочная установка",
+    )
+    assert "установка" in chosen.lower()
+    assert note.startswith("object_selected_alternative")
+
+
+def test_select_best_phones_candidate_prefers_valid_numbers():
+    chosen, note = _select_best_phones_candidate(
+        "",
+        "+375 (29) 563-38-19; (017) 123-45-67",
+    )
+    assert "375" in chosen
+    assert note.startswith("phones_selected_alternative")

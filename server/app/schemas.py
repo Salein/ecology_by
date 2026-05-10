@@ -26,7 +26,7 @@ class WasteObjectOut(BaseModel):
     phones: str | None = None
     waste_code: str | None = None
     waste_type_name: str | None = None
-    accepts_external_waste: bool = True
+    accepts_external_waste: bool | None = None
     # Для обратной совместимости: "основная" дистанция (по дорогам, если есть, иначе по воздуху)
     distance_km: float | None = None
     # Явные поля двух методов расчёта

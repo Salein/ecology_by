@@ -27,6 +27,12 @@ server/app/data/password_reset_tokens.json
 **/*.egg-info/
 **/.pytest_cache/
 **/.mypy_cache/
+# Локальные SQLite и прочие временные файлы разработки
+server/tmp_*.db
+**/tmp_import*.db
+
+# --- Vite / Vitest (кэш внутри или рядом с node_modules) ---
+**/.vite/
 
 # --- Node / Next.js ---
 **/node_modules/

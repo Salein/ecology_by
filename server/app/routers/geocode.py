@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.deps import get_current_user
-from app.services.auth_users import UserRecord
-from app.services.nominatim import reverse_geocode, search_places
+from app.core.security import get_current_user
+from app.domains.auth.service import UserRecord
+from app.services.nominatim import search_places
+from app.domains.geocode.service import reverse_geocode
 
 router = APIRouter(prefix="/geocode", tags=["geocode"])
 

@@ -105,3 +105,33 @@ def test_load_search_records_text_prefilter_maps_rows_without_payload(monkeypatc
     assert out[0]["owner"] == ""
     assert out[0]["object_name"] == ""
     assert out[0]["accepts_external_waste"] is False
+
+
+def test_load_search_records_prefilter_maps_unknown_accepts_as_none(monkeypatch) -> None:
+    rows = [
+        {
+            "pk": 55,
+            "source_part": 1,
+            "record_id": 400,
+            "owner": "ОАО Тест",
+            "object_name": "Установка",
+            "waste_code": "3141204",
+            "waste_type_name": "Отход",
+            "accepts_external_waste": None,
+            "address": "г. Минск",
+            "phones": "+375291112233",
+            "lat": None,
+            "lon": None,
+        }
+    ]
+    fake = _FakeSession(rows)
+    monkeypatch.setattr(cache, "session_scope", _fake_scope(fake))
+
+    out = cache.load_search_records_prefilter(
+        waste_code="3141204",
+        accepts_external_only=False,
+        repair_addresses=False,
+    )
+
+    assert len(out) == 1
+    assert out[0]["accepts_external_waste"] is None

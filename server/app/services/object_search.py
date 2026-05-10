@@ -3,9 +3,9 @@
 Координаты объекта: из записи реестра, из geocode_cache или запрос к Nominatim по полю address
 (оценка по адресу, не точное измерение).
 
-Без координат пользователя — в выборку попадают все совпадения по запросу (полный реестр в БД).
-С координатами — ранжирование и добор до лимита только среди записей, где accepts_external_waste
-не False (в БД после импорта False только при явной отметке «не принимает» в тексте карточки).
+Без координат пользователя — в выборку попадают все совпадения по запросу.
+С координатами — ранжирование и добор до лимита только среди записей с явным accepts_external_waste=True;
+False и NULL (неизвестно) не попадают в подбор «принимают от других».
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from app.config import settings
+from app.core.config import settings
 from app.schemas import ObjectSearchRequest, ObjectSearchResponse, WasteObjectOut
 from app.services.belarus_locality_centroids import approx_coords_from_by_text, approx_coords_from_locality_in_address
 from app.services.distance import haversine_km
@@ -39,19 +39,8 @@ def _normalize_addr_key(s: str) -> str:
 
 
 def _row_accepts_external_waste(row: dict[str, Any]) -> bool:
-    """Совпадает с полем в ответе API: False — не принимает от других; без ключа — True (старые записи)."""
-    v = row.get("accepts_external_waste", True)
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return bool(v)
-    if isinstance(v, str):
-        s = v.strip().casefold()
-        if s in ("false", "0", "no", "n", "нет", "не принимает", "off"):
-            return False
-        if s in ("true", "1", "yes", "y", "да", "принимает", "on"):
-            return True
-    return bool(v)
+    """Для фильтра «принимают от других»: только явный True."""
+    return row.get("accepts_external_waste") is True
 
 
 def _coords_from_row(row: dict[str, Any]) -> tuple[float | None, float | None]:
@@ -363,19 +352,12 @@ def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
     code = (body.waste_code or "").strip()
     location_selected = body.lat is not None and body.lon is not None
     limit = max(1, settings.registry_closest_limit)
-    numeric_id_hint: int | None = None
-    if q.isdigit() and 1 <= len(q) <= 6:
-        try:
-            numeric_id_hint = int(q)
-        except ValueError:
-            numeric_id_hint = None
 
     # Крупная оптимизация: в частых сценариях фильтруем в SQL до загрузки в память.
     sql_text_filtered = False
-    if code or numeric_id_hint is not None:
+    if code:
         rows = load_search_records_prefilter(
             waste_code=code or None,
-            record_id=numeric_id_hint,
             accepts_external_only=location_selected,
         )
     elif q:
@@ -396,13 +378,9 @@ def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
         if code and str(row.get("waste_code") or "") != code:
             continue
         if q and not sql_text_filtered:
-            id_s = str(row.get("id", ""))
             wc = str(row.get("waste_code") or "")
             wtn = str(row.get("waste_type_name") or "")
-            blob = (
-                f"{id_s} {wc} {wtn} {row.get('owner', '')} {row.get('object_name', '')} "
-                f"{row.get('address', '')} {row.get('phones', '')}"
-            ).lower()
+            blob = f"{wc} {wtn}".lower()
             if q not in blob:
                 continue
         filtered.append(row)
@@ -440,7 +418,7 @@ def run_object_search(body: ObjectSearchRequest) -> ObjectSearchResponse:
         return ObjectSearchResponse(items=[_row_to_out(r) for r in picked])
 
     # При выбранной точке показываем только объекты, принимающие отходы от других.
-    if not (code or numeric_id_hint is not None or sql_text_filtered or not q):
+    if not (code or sql_text_filtered or not q):
         filtered = [r for r in filtered if _row_accepts_external_waste(r)]
     if not filtered:
         logger.debug(
@@ -600,7 +578,13 @@ def _row_to_out(
         phones=ph_s or None,
         waste_code=waste_code,
         waste_type_name=waste_type_name,
-        accepts_external_waste=bool(row.get("accepts_external_waste", True)),
+        accepts_external_waste=(
+            True
+            if row.get("accepts_external_waste") is True
+            else False
+            if row.get("accepts_external_waste") is False
+            else None
+        ),
         distance_km=distance_road_km if distance_road_km is not None else distance_air_km,
         distance_air_km=distance_air_km,
         distance_road_km=distance_road_km,
@@ -610,3 +594,32 @@ def _row_to_out(
         distance_spread_note=distance_spread_note,
         distance_note=distance_note,
     )
+
+
+def suggest_waste_variants(query: str, limit: int = 12) -> list[dict[str, str]]:
+    """
+    Подсказки по коду/виду отхода из текущей БД.
+    Возвращает уникальные пары (waste_code, waste_type_name), отсортированные по релевантности.
+    """
+    q = (query or "").strip().casefold()
+    if len(q) < 2:
+        return []
+    rows = load_search_records_text_prefilter(query=q, limit=400, repair_addresses=False)
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for r in rows:
+        code = str(r.get("waste_code") or "").strip()
+        wname = str(r.get("waste_type_name") or "").strip()
+        if not code and not wname:
+            continue
+        key = (code, wname)
+        if key in seen:
+            continue
+        blob = f"{code} {wname}".casefold()
+        if q not in blob:
+            continue
+        seen.add(key)
+        out.append({"waste_code": code, "waste_type_name": wname})
+        if len(out) >= max(1, int(limit)):
+            break
+    return out

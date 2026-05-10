@@ -9,9 +9,9 @@ from typing import Any, Literal
 import bcrypt
 from sqlalchemy import select
 
-from app.config import settings
-from app.db.models import UserModel
-from app.db.session import session_scope
+from app.core.config import settings
+from app.infra.db.models import UserModel
+from app.infra.db.session import session_scope
 
 _DATA = Path(__file__).resolve().parent.parent / "data"
 USERS_PATH = _DATA / "auth_users.json"
